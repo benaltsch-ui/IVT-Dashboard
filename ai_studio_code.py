@@ -168,4 +168,95 @@ def main():
     st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
     
     # 1. MARKET DATA
-    hist
+    history, info = get_market_data("IVT.JO")
+    
+    if not history.empty:
+        curr = history['Close'].iloc[-1]
+        prev = history['Close'].iloc[-2]
+        pct = ((curr - prev) / prev) * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Price", f"R {curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        
+        # --- CHARTS SECTION (IMPROVED) ---
+        st.subheader("Price Performance & Trading Activity")
+        
+        # Calculate 30-Day Moving Average for Volume
+        history['Vol_Avg'] = history['Volume'].rolling(window=30).mean()
+
+        fig = make_subplots(
+            rows=2, cols=1, 
+            shared_xaxes=True, 
+            vertical_spacing=0.1, 
+            row_heights=[0.7, 0.3]
+        )
+
+        # Row 1: Price
+        fig.add_trace(go.Candlestick(
+            x=history.index, open=history['Open'], high=history['High'],
+            low=history['Low'], close=history['Close'], name="Price"
+        ), row=1, col=1)
+
+        # Row 2: Volume Bars (Green=Up Day, Red=Down Day)
+        colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
+        fig.add_trace(go.Bar(
+            x=history.index, y=history['Volume'],
+            marker_color=colors, name="Shares Traded",
+            hovertemplate="<b>Date:</b> %{x}<br><b>Shares:</b> %{y:,.0f}<extra></extra>"
+        ), row=2, col=1)
+
+        # Row 2: Volume Average Line
+        fig.add_trace(go.Scatter(
+            x=history.index, y=history['Vol_Avg'],
+            mode='lines', name="30-Day Avg Volume",
+            line=dict(color='orange', width=2)
+        ), row=2, col=1)
+
+        fig.update_layout(height=650, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0), hovermode='x unified')
+        fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
+        fig.update_yaxes(title_text="<b>No. Shares Traded</b>", row=2, col=1)
+        fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
+        
+        st.plotly_chart(fig, use_container_width=True)
+
+        # Explanation Box
+        st.info("""
+        **📊 How to read the Volume Chart (Bottom Graph):**
+        *   **Bars:** Represent the total number of shares traded that day.
+        *   **Orange Line:** The 30-day average. Bars spiking above this line indicate **high conviction** events (e.g., Earnings, M&A News).
+        *   **Color:** 🟢 **Green** = Buyers were dominant (Price closed higher) | 🔴 **Red** = Sellers were dominant (Price closed lower).
+        """)
+        
+    # 2. NEWS SECTION
+    st.divider()
+    st.subheader("📰 Deep News Reader")
+    st.caption("Latest Articles | Verified Links & Dates")
+    
+    # Primary Search
+    news = get_google_news("Invicta Holdings Limited")
+    # Secondary Search if empty
+    if not news:
+        st.warning("No direct news found. Checking Sector...")
+        news = get_google_news("JSE Industrial Engineering")
+        
+    if news:
+        df = pd.DataFrame(news)
+        avg = df['Score'].mean()
+        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        
+        for i, row in df.iterrows():
+            with st.expander(f"{row['Icon']} {row['title']}"):
+                m1, m2 = st.columns([3, 1])
+                m1.caption(f"**Source:** {row['source']} | **Published:** {row['date']}")
+                m2.caption(f"**{row['Method']}**")
+                
+                st.info(f"💡 {row['Explanation']}")
+                st.markdown(f"**Preview:** {row['snippet']}")
+                st.markdown(f"🔗 [**Click to Read Full Article**]({row['link']})")
+    else:
+        st.write("No news found.")
+
+if __name__ == "__main__":
+    main()
