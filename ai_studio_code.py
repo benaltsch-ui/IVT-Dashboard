@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 from duckduckgo_search import DDGS
@@ -14,8 +15,13 @@ st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", 
 # --- CACHING & MODEL LOADING ---
 @st.cache_resource
 def load_sentiment_resources():
-    nltk.download('vader_lexicon', quiet=True)
-    nltk.download('punkt', quiet=True) # Required for newspaper3k
+    try:
+        nltk.data.find('sentiment/vader_lexicon.zip')
+        nltk.data.find('tokenizers/punkt.zip')
+    except LookupError:
+        nltk.download('vader_lexicon', quiet=True)
+        nltk.download('punkt', quiet=True)
+    
     sia = SentimentIntensityAnalyzer()
     
     # Financial Dictionary (Teaching the AI market terms)
@@ -29,9 +35,14 @@ def load_sentiment_resources():
     sia.lexicon.update(financial_lexicon)
     return sia
 
-sia = load_sentiment_resources()
+# Load resources safely
+try:
+    sia = load_sentiment_resources()
+except Exception as e:
+    st.error(f"Error loading AI models: {e}")
+    st.stop()
 
-# --- NEW SCRAPER (Newspaper3k) ---
+# --- SCRAPER FUNCTIONS ---
 def get_article_content(url):
     """
     Uses newspaper3k to download and parse the article.
@@ -40,26 +51,20 @@ def get_article_content(url):
         article = Article(url)
         article.download()
         article.parse()
-        
-        # If the body text is too short, the download likely failed or was blocked
         if len(article.text) < 150:
             return None
-            
         return article.text
-    except Exception as e:
+    except:
         return None
 
 # --- SENTIMENT LOGIC ---
 def analyze_content(text, method="Snippet"):
-    # 1. Score
     score = sia.polarity_scores(text)['compound']
     
-    # 2. Label
     if score >= 0.05: label, icon = "Positive", "🟢"
     elif score <= -0.05: label, icon = "Negative", "🔴"
     else: label, icon = "Neutral", "⚪"
     
-    # 3. Explain Drivers
     words = text.lower().split()
     drivers = []
     for word in words:
@@ -81,41 +86,38 @@ def analyze_content(text, method="Snippet"):
 
 @st.cache_data(ttl=900)
 def get_market_data(ticker):
-    stock = yf.Ticker(ticker)
     try:
-        return stock.history(period="1y"), stock.info
+        stock = yf.Ticker(ticker)
+        history = stock.history(period="1y")
+        info = stock.info
+        return history, info
     except:
         return pd.DataFrame(), {}
 
 @st.cache_data(ttl=3600)
 def get_live_news_duckduckgo(query):
-    """
-    Uses DuckDuckGo to get DIRECT links.
-    """
-    # DDGS allows us to search for news
     try:
+        # Using DDGS to search for news
         results = DDGS().news(keywords=f"{query} South Africa", region="za-en", safesearch="off", max_results=5)
     except Exception as e:
-        st.error(f"Search Error: {e}")
+        st.error(f"News Search Error: {e}")
         return []
     
     news_items = []
     
-    # Progress Bar
-    progress_text = "Fetching direct articles..."
-    my_bar = st.progress(0, text=progress_text)
-    
     if not results:
         return []
 
+    # Progress Bar
+    progress_text = "Analyzing articles..."
+    my_bar = st.progress(0, text=progress_text)
+
     for i, result in enumerate(results):
-        my_bar.progress((i + 1) / len(results), text=f"Reading: {result.get('title', 'Article')[:20]}...")
+        my_bar.progress((i + 1) / len(results), text=f"Reading: {result.get('title', 'News')[:20]}...")
         
-        # DuckDuckGo gives us a 'url' key which is the REAL link.
         direct_url = result.get('url', '')
-        
-        # 1. Try to Scrape Full Text
         full_text = None
+        
         if direct_url:
             full_text = get_article_content(direct_url)
         
@@ -124,15 +126,13 @@ def get_live_news_duckduckgo(query):
             snippet = full_text[:300] + "..."
             method = "✅ Full Text Read"
         else:
-            # Fallback to the snippet
             fallback_text = f"{result.get('title', '')}. {result.get('body', '')}"
             score, label, icon, expl = analyze_content(fallback_text, "Search Snippet")
             snippet = result.get('body', 'No preview available')
             method = "⚠️ Snippet Only (Blocked)"
 
-        # --- THIS WAS THE BLOCK CAUSING ERRORS BEFORE ---
         news_items.append({
-            "title": result.get('title', 'Unknown Title'),
+            "title": result.get('title', 'Unknown'),
             "link": direct_url,
             "source": result.get('source', 'News'),
             "date": result.get('date', ''),
@@ -143,7 +143,6 @@ def get_live_news_duckduckgo(query):
             "Explanation": expl,
             "Method": method
         })
-        # ------------------------------------------------
         
     my_bar.empty()
     return news_items
@@ -152,30 +151,31 @@ def get_live_news_duckduckgo(query):
 def main():
     st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
     
-    # 1. Market Data
+    # 1. MARKET DATA & CHARTING
     history, info = get_market_data("IVT.JO")
     
     if not history.empty:
-        # Calculate Metrics
+        # Metrics
         curr = history['Close'].iloc[-1]
         prev = history['Close'].iloc[-2]
         pct = ((curr - prev) / prev) * 100
         
-        # Top KPI Row
         c1, c2, c3 = st.columns(3)
         c1.metric("Current Price", f"R {curr:.2f}", f"{pct:.2f}%")
         c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
         c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
         
-        # --- IMPROVED CHARTING SECTION ---
+        # --- SUBPLOT CHART LOGIC ---
         st.subheader("Price Performance & Volume")
         
-        # Create a chart with 2 rows (Price on top, Volume on bottom)
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                            vertical_spacing=0.05, 
-                            row_heights=[0.7, 0.3]) # Price gets 70% space, Volume 30%
+        fig = make_subplots(
+            rows=2, cols=1, 
+            shared_xaxes=True, 
+            vertical_spacing=0.05, 
+            row_heights=[0.7, 0.3]
+        )
 
-        # Row 1: Candlestick Chart (Price)
+        # Candlestick (Price)
         fig.add_trace(go.Candlestick(
             x=history.index,
             open=history['Open'], high=history['High'],
@@ -183,8 +183,7 @@ def main():
             name="Price"
         ), row=1, col=1)
 
-        # Row 2: Bar Chart (Volume)
-        # We color volume bars based on price movement (Green if up, Red if down)
+        # Bar (Volume) - Color Coded
         colors = ['red' if row['Open'] - row['Close'] > 0 else 'green' for index, row in history.iterrows()]
         fig.add_trace(go.Bar(
             x=history.index, 
@@ -193,27 +192,25 @@ def main():
             name="Volume"
         ), row=2, col=1)
 
-        # --- LABELS AND STYLING ---
+        # Layout styling
         fig.update_layout(
-            height=600, # Taller chart to fit labels
+            height=600,
             margin=dict(l=20, r=20, t=30, b=20),
-            xaxis_rangeslider_visible=False, # Hide the bottom slider to save space
+            xaxis_rangeslider_visible=False,
             showlegend=False,
-            hovermode='x unified' # Shows all data when you hover over a date
+            hovermode='x unified'
         )
 
-        # Y-Axis Labels
+        # Axis Labels
         fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
         fig.update_yaxes(title_text="<b>Volume</b>", row=2, col=1)
-        
-        # X-Axis Label
         fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
         
-        # Render
         st.plotly_chart(fig, use_container_width=True)
-        # ---------------------------------
-    
-    # 2. News Data
+    else:
+        st.error("Failed to load market data. Check ticker symbol or internet connection.")
+
+    # 2. NEWS DATA
     st.divider()
     st.subheader("📰 Deep News Reader")
     st.caption("Powered by DuckDuckGo Direct Links & Newspaper3k")
@@ -239,3 +236,6 @@ def main():
                 st.info(f"💡 {row['Explanation']}")
                 st.markdown(f"**Preview:** {row['snippet']}")
                 st.markdown(f"[Read Source]({row['link']})")
+
+if __name__ == "__main__":
+    main()
