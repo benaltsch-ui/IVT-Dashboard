@@ -6,9 +6,8 @@ from plotly.subplots import make_subplots
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
-from newspaper import Article
 import requests
-import datetime
+import trafilatura
 from email.utils import parsedate_to_datetime
 
 # --- CONFIGURATION ---
@@ -19,14 +18,12 @@ st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", 
 def load_sentiment_resources():
     try:
         nltk.data.find('sentiment/vader_lexicon.zip')
-        nltk.data.find('tokenizers/punkt.zip')
     except LookupError:
         nltk.download('vader_lexicon', quiet=True)
-        nltk.download('punkt', quiet=True)
     
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Lexicon
+    # Financial Dictionary (Teaching the AI market slang)
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -39,36 +36,41 @@ def load_sentiment_resources():
 
 try:
     sia = load_sentiment_resources()
-except:
-    st.error("Error loading AI models.")
+except Exception as e:
+    st.error(f"Error loading AI: {e}")
     st.stop()
 
 # --- HELPER: RESOLVE GOOGLE LINKS ---
 def get_final_url(url):
     """
-    Follows the Google Redirect to get the actual clean URL (e.g., iol.co.za)
-    This fixes broken links and allows the scraper to work better.
+    Follows the Google Redirect to get the actual clean URL.
+    This ensures links open properly when clicked.
     """
     try:
-        # We use a session with a browser header to follow the redirect
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
+        # We allow redirects to find the real destination
         response = session.head(url, allow_redirects=True, timeout=5)
         return response.url
     except:
         return url
 
-# --- HELPER: ARTICLE SCRAPER ---
+# --- HELPER: STABLE SCRAPER ---
 def get_article_content(url):
+    """
+    Uses Trafilatura (More stable than Newspaper3k).
+    """
     try:
-        article = Article(url)
-        article.download()
-        article.parse()
-        if len(article.text) < 150:
-            return None
-        return article.text
+        # Download
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            # Extract
+            text = trafilatura.extract(downloaded)
+            if text and len(text) > 200:
+                return text
     except:
-        return None
+        pass
+    return None
 
 # --- SENTIMENT LOGIC ---
 def analyze_content(text, method="Snippet"):
@@ -103,7 +105,7 @@ def get_market_data(ticker):
 
 @st.cache_data(ttl=3600)
 def get_google_news(query):
-    # Google News RSS (Best for coverage and dates)
+    # Google News RSS
     encoded = query.replace(" ", "%20")
     rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
     
@@ -111,27 +113,25 @@ def get_google_news(query):
     if not feed.entries: return []
     
     news_items = []
-    # Increase limit to 10 articles
-    limit = min(len(feed.entries), 10)
+    limit = min(len(feed.entries), 8) # Limit to 8 for speed
     
-    progress_text = "Resolving links and analyzing..."
+    progress_text = "Analyzing news stream..."
     my_bar = st.progress(0, text=progress_text)
     
     for i, entry in enumerate(feed.entries[:limit]):
         my_bar.progress((i + 1) / limit, text=f"Processing: {entry.title[:20]}...")
         
-        # 1. Get Date
+        # 1. Date Formatting
         try:
-            # Parse the messy RSS date into a clean string
             dt = parsedate_to_datetime(entry.published)
-            clean_date = dt.strftime("%a, %d %b %Y") # e.g. Wed, 26 Nov 2025
+            clean_date = dt.strftime("%d %b %Y") # 26 Nov 2025
         except:
-            clean_date = "Unknown Date"
+            clean_date = "Recent"
 
-        # 2. Resolve URL (Fix broken links)
+        # 2. Link Resolution (Fixing broken links)
         real_url = get_final_url(entry.link)
         
-        # 3. Scrape
+        # 3. Scraping
         full_text = get_article_content(real_url)
         
         if full_text:
@@ -139,9 +139,8 @@ def get_google_news(query):
             snippet = full_text[:300] + "..."
             method = "✅ Full Text"
         else:
-            # Fallback to description from RSS
+            # Fallback
             raw_desc = entry.get('description', entry.title)
-            # Clean HTML tags
             import re
             clean_desc = re.sub('<.*?>', '', raw_desc)
             score, label, icon, expl = analyze_content(clean_desc, "Headline/Snippet")
@@ -150,7 +149,7 @@ def get_google_news(query):
 
         news_items.append({
             "title": entry.title,
-            "link": real_url, # The clean link
+            "link": real_url,
             "source": entry.source.title if hasattr(entry, 'source') else "News",
             "date": clean_date,
             "snippet": snippet,
@@ -169,58 +168,4 @@ def main():
     st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
     
     # 1. MARKET DATA
-    history, info = get_market_data("IVT.JO")
-    
-    if not history.empty:
-        curr = history['Close'].iloc[-1]
-        prev = history['Close'].iloc[-2]
-        pct = ((curr - prev) / prev) * 100
-        
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Price", f"R {curr:.2f}", f"{pct:.2f}%")
-        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
-        c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
-        
-        # Charts
-        st.subheader("Price Performance & Volume")
-        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
-        fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
-        colors = ['red' if row['Open'] - row['Close'] > 0 else 'green' for index, row in history.iterrows()]
-        fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
-        fig.update_layout(height=500, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=False, hovermode='x unified')
-        fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
-        fig.update_yaxes(title_text="<b>Volume</b>", row=2, col=1)
-        fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
-        st.plotly_chart(fig, use_container_width=True)
-    
-    # 2. NEWS
-    st.divider()
-    st.subheader("📰 Deep News Reader")
-    st.caption("Latest 10 Articles | Dates & Links verified")
-    
-    news = get_google_news("Invicta Holdings Limited")
-    if not news:
-        st.warning("No direct news found. Checking Sector...")
-        news = get_google_news("JSE Industrial Engineering")
-        
-    if news:
-        df = pd.DataFrame(news)
-        avg = df['Score'].mean()
-        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
-        
-        for i, row in df.iterrows():
-            with st.expander(f"{row['Icon']} {row['title']}"):
-                # Top Row: Source and Date
-                m1, m2 = st.columns([3, 1])
-                m1.caption(f"**Source:** {row['source']} | **Published:** {row['date']}")
-                m2.caption(f"**{row['Method']}**")
-                
-                # Content
-                st.info(f"💡 {row['Explanation']}")
-                st.markdown(f"**Preview:** {row['snippet']}")
-                st.markdown(f"🔗 [**Click to Read Full Article**]({row['link']})")
-    else:
-        st.write("No news found.")
-
-if __name__ == "__main__":
-    main()
+    hist
