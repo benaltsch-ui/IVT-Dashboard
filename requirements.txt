@@ -5,4 +5,4 @@ plotly
 nltk
 feedparser
 requests
-beautifulsoup4
+trafilatura
