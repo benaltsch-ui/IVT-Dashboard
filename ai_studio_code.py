@@ -154,28 +154,74 @@ def main():
     
     # 1. Market Data
     history, info = get_market_data("IVT.JO")
+    
     if not history.empty:
+        # Calculate Metrics
         curr = history['Close'].iloc[-1]
-        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Price (ZAR)", f"{curr:.2f}", f"{pct:.2f}%")
-        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        prev = history['Close'].iloc[-2]
+        pct = ((curr - prev) / prev) * 100
         
-        fig = go.Figure(data=[go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'])])
-        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0))
+        # Top KPI Row
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Current Price", f"R {curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        
+        # --- IMPROVED CHARTING SECTION ---
+        st.subheader("Price Performance & Volume")
+        
+        # Create a chart with 2 rows (Price on top, Volume on bottom)
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
+                            vertical_spacing=0.05, 
+                            row_heights=[0.7, 0.3]) # Price gets 70% space, Volume 30%
+
+        # Row 1: Candlestick Chart (Price)
+        fig.add_trace(go.Candlestick(
+            x=history.index,
+            open=history['Open'], high=history['High'],
+            low=history['Low'], close=history['Close'],
+            name="Price"
+        ), row=1, col=1)
+
+        # Row 2: Bar Chart (Volume)
+        # We color volume bars based on price movement (Green if up, Red if down)
+        colors = ['red' if row['Open'] - row['Close'] > 0 else 'green' for index, row in history.iterrows()]
+        fig.add_trace(go.Bar(
+            x=history.index, 
+            y=history['Volume'],
+            marker_color=colors,
+            name="Volume"
+        ), row=2, col=1)
+
+        # --- LABELS AND STYLING ---
+        fig.update_layout(
+            height=600, # Taller chart to fit labels
+            margin=dict(l=20, r=20, t=30, b=20),
+            xaxis_rangeslider_visible=False, # Hide the bottom slider to save space
+            showlegend=False,
+            hovermode='x unified' # Shows all data when you hover over a date
+        )
+
+        # Y-Axis Labels
+        fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
+        fig.update_yaxes(title_text="<b>Volume</b>", row=2, col=1)
+        
+        # X-Axis Label
+        fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
+        
+        # Render
         st.plotly_chart(fig, use_container_width=True)
+        # ---------------------------------
     
     # 2. News Data
     st.divider()
     st.subheader("📰 Deep News Reader")
     st.caption("Powered by DuckDuckGo Direct Links & Newspaper3k")
     
-    # Search for Invicta
     news = get_live_news_duckduckgo("Invicta Holdings Limited")
     
-    # Fallback if Invicta has no news today
     if not news:
-        st.warning("No direct news found for Invicta. Checking Industrial Sector...")
+        st.warning("No direct news found. Checking Industrial Sector...")
         news = get_live_news_duckduckgo("JSE Industrial Engineering")
         
     if news:
@@ -193,6 +239,3 @@ def main():
                 st.info(f"💡 {row['Explanation']}")
                 st.markdown(f"**Preview:** {row['snippet']}")
                 st.markdown(f"[Read Source]({row['link']})")
-
-if __name__ == "__main__":
-    main()
