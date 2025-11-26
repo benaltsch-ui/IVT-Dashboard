@@ -23,7 +23,7 @@ def load_sentiment_resources():
     
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Dictionary (Teaching the AI market slang)
+    # Financial Dictionary
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -42,14 +42,9 @@ except Exception as e:
 
 # --- HELPER: RESOLVE GOOGLE LINKS ---
 def get_final_url(url):
-    """
-    Follows the Google Redirect to get the actual clean URL.
-    This ensures links open properly when clicked.
-    """
     try:
         session = requests.Session()
         session.headers.update({"User-Agent": "Mozilla/5.0"})
-        # We allow redirects to find the real destination
         response = session.head(url, allow_redirects=True, timeout=5)
         return response.url
     except:
@@ -57,14 +52,9 @@ def get_final_url(url):
 
 # --- HELPER: STABLE SCRAPER ---
 def get_article_content(url):
-    """
-    Uses Trafilatura (More stable than Newspaper3k).
-    """
     try:
-        # Download
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
-            # Extract
             text = trafilatura.extract(downloaded)
             if text and len(text) > 200:
                 return text
@@ -75,7 +65,6 @@ def get_article_content(url):
 # --- SENTIMENT LOGIC ---
 def analyze_content(text, method="Snippet"):
     score = sia.polarity_scores(text)['compound']
-    
     if score >= 0.05: label, icon = "Positive", "🟢"
     elif score <= -0.05: label, icon = "Negative", "🔴"
     else: label, icon = "Neutral", "⚪"
@@ -95,6 +84,7 @@ def analyze_content(text, method="Snippet"):
     explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers]) if unique_drivers else f"Based on {method}."
     return score, label, icon, explanation
 
+# --- DATA FETCHING ---
 @st.cache_data(ttl=900)
 def get_market_data(ticker):
     try:
@@ -103,47 +93,77 @@ def get_market_data(ticker):
     except:
         return pd.DataFrame(), {}
 
+@st.cache_data(ttl=900)
+def get_competitor_data():
+    # Comparing Invicta (IVT) vs Hudaco (HDC) and Barloworld (BAW)
+    tickers = {'Invicta (IVT)': 'IVT.JO', 'Hudaco (HDC)': 'HDC.JO', 'Barloworld (BAW)': 'BAW.JO'}
+    
+    comp_metrics = []
+    comp_history = pd.DataFrame()
+    
+    for name, sym in tickers.items():
+        try:
+            stock = yf.Ticker(sym)
+            info = stock.info
+            hist = stock.history(period="1y")
+            
+            # Normalize price to % growth (starts at 0)
+            if not hist.empty:
+                start_price = hist['Close'].iloc[0]
+                hist['Rel_Perf'] = ((hist['Close'] - start_price) / start_price) * 100
+                comp_history[name] = hist['Rel_Perf']
+                
+                # Metrics
+                pe = info.get('trailingPE', 0)
+                div = info.get('dividendYield', 0)
+                div_fmt = f"{div*100:.2f}%" if div else "N/A"
+                
+                comp_metrics.append({
+                    "Company": name,
+                    "Current Price": f"R {hist['Close'].iloc[-1]:.2f}",
+                    "1Y Performance": f"{comp_history[name].iloc[-1]:.2f}%",
+                    "P/E Ratio": f"{pe:.2f}" if pe else "N/A",
+                    "Div Yield": div_fmt
+                })
+        except:
+            continue
+            
+    return pd.DataFrame(comp_metrics), comp_history
+
 @st.cache_data(ttl=3600)
 def get_google_news(query):
-    # Google News RSS
     encoded = query.replace(" ", "%20")
     rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
-    
     feed = feedparser.parse(rss_url)
     if not feed.entries: return []
     
     news_items = []
-    limit = min(len(feed.entries), 8) # Limit to 8 for speed
+    limit = min(len(feed.entries), 6) # Limit to 6
     
-    progress_text = "Analyzing news stream..."
+    progress_text = "Reading news stream..."
     my_bar = st.progress(0, text=progress_text)
     
     for i, entry in enumerate(feed.entries[:limit]):
-        my_bar.progress((i + 1) / limit, text=f"Processing: {entry.title[:20]}...")
+        my_bar.progress((i + 1) / limit, text=f"Analyzing: {entry.title[:20]}...")
         
-        # 1. Date Formatting
         try:
             dt = parsedate_to_datetime(entry.published)
-            clean_date = dt.strftime("%d %b %Y") # 26 Nov 2025
+            clean_date = dt.strftime("%d %b %Y")
         except:
             clean_date = "Recent"
 
-        # 2. Link Resolution (Fixing broken links)
         real_url = get_final_url(entry.link)
-        
-        # 3. Scraping
         full_text = get_article_content(real_url)
         
         if full_text:
-            score, label, icon, expl = analyze_content(full_text, "Full Article Text")
+            score, label, icon, expl = analyze_content(full_text, "Full Text")
             snippet = full_text[:300] + "..."
             method = "✅ Full Text"
         else:
-            # Fallback
             raw_desc = entry.get('description', entry.title)
             import re
             clean_desc = re.sub('<.*?>', '', raw_desc)
-            score, label, icon, expl = analyze_content(clean_desc, "Headline/Snippet")
+            score, label, icon, expl = analyze_content(clean_desc, "Snippet")
             snippet = clean_desc
             method = "⚠️ Snippet"
 
@@ -180,83 +200,102 @@ def main():
         c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
         c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
         
-        # --- CHARTS SECTION (IMPROVED) ---
-        st.subheader("Price Performance & Trading Activity")
-        
-        # Calculate 30-Day Moving Average for Volume
+        # Charts
+        st.subheader("Price Performance & Trading Volume")
         history['Vol_Avg'] = history['Volume'].rolling(window=30).mean()
 
-        fig = make_subplots(
-            rows=2, cols=1, 
-            shared_xaxes=True, 
-            vertical_spacing=0.1, 
-            row_heights=[0.7, 0.3]
-        )
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
 
-        # Row 1: Price
-        fig.add_trace(go.Candlestick(
-            x=history.index, open=history['Open'], high=history['High'],
-            low=history['Low'], close=history['Close'], name="Price"
-        ), row=1, col=1)
-
-        # Row 2: Volume Bars (Green=Up Day, Red=Down Day)
+        fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
         colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
-        fig.add_trace(go.Bar(
-            x=history.index, y=history['Volume'],
-            marker_color=colors, name="Shares Traded",
-            hovertemplate="<b>Date:</b> %{x}<br><b>Shares:</b> %{y:,.0f}<extra></extra>"
-        ), row=2, col=1)
+        fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Shares Traded"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="30-Day Avg Volume", line=dict(color='orange', width=2)), row=2, col=1)
 
-        # Row 2: Volume Average Line
-        fig.add_trace(go.Scatter(
-            x=history.index, y=history['Vol_Avg'],
-            mode='lines', name="30-Day Avg Volume",
-            line=dict(color='orange', width=2)
-        ), row=2, col=1)
-
-        fig.update_layout(height=650, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0), hovermode='x unified')
+        fig.update_layout(height=600, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0), hovermode='x unified')
         fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
-        fig.update_yaxes(title_text="<b>No. Shares Traded</b>", row=2, col=1)
+        fig.update_yaxes(title_text="<b>Shares Traded</b>", row=2, col=1)
         fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
-        
         st.plotly_chart(fig, use_container_width=True)
-
-        # Explanation Box
-        st.info("""
-        **📊 How to read the Volume Chart (Bottom Graph):**
-        *   **Bars:** Represent the total number of shares traded that day.
-        *   **Orange Line:** The 30-day average. Bars spiking above this line indicate **high conviction** events (e.g., Earnings, M&A News).
-        *   **Color:** 🟢 **Green** = Buyers were dominant (Price closed higher) | 🔴 **Red** = Sellers were dominant (Price closed lower).
-        """)
         
-    # 2. NEWS SECTION
-    st.divider()
-    st.subheader("📰 Deep News Reader")
-    st.caption("Latest Articles | Verified Links & Dates")
+        st.info("**Chart Guide:** 🟢 Green bars = Buying Pressure | 🔴 Red bars = Selling Pressure | 🟠 Orange Line = Average Volume (Spikes above this indicate major news events).")
     
-    # Primary Search
+    # 2. NEWS
+    st.divider()
+    st.subheader("📰 News & Media Sentiment")
+    
     news = get_google_news("Invicta Holdings Limited")
-    # Secondary Search if empty
     if not news:
-        st.warning("No direct news found. Checking Sector...")
         news = get_google_news("JSE Industrial Engineering")
         
+    avg_score = 0
     if news:
         df = pd.DataFrame(news)
-        avg = df['Score'].mean()
-        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        avg_score = df['Score'].mean()
         
+        # News List
         for i, row in df.iterrows():
             with st.expander(f"{row['Icon']} {row['title']}"):
                 m1, m2 = st.columns([3, 1])
-                m1.caption(f"**Source:** {row['source']} | **Published:** {row['date']}")
+                m1.caption(f"**Source:** {row['source']} | **Date:** {row['date']}")
                 m2.caption(f"**{row['Method']}**")
-                
                 st.info(f"💡 {row['Explanation']}")
-                st.markdown(f"**Preview:** {row['snippet']}")
-                st.markdown(f"🔗 [**Click to Read Full Article**]({row['link']})")
+                st.markdown(f"[Read Article]({row['link']})")
     else:
         st.write("No news found.")
+
+    # 3. COMPETITOR ANALYSIS & FINAL VERDICT
+    st.divider()
+    st.subheader("🏆 Competitor Intelligence & Final Verdict")
+    
+    with st.spinner("Analyzing Peers (Hudaco & Barloworld)..."):
+        comp_df, comp_hist = get_competitor_data()
+    
+    if not comp_df.empty:
+        c1, c2 = st.columns([1, 1])
+        
+        with c1:
+            st.markdown("##### 1-Year Relative Performance")
+            st.caption("How much would R100 invested 1 year ago be worth now?")
+            
+            # Line Chart for Comparison
+            fig_comp = go.Figure()
+            for col in comp_hist.columns:
+                # Highlight Invicta
+                width = 4 if "Invicta" in col else 2
+                fig_comp.add_trace(go.Scatter(x=comp_hist.index, y=comp_hist[col], mode='lines', name=col, line=dict(width=width)))
+            
+            fig_comp.update_layout(height=350, margin=dict(l=0, r=0, t=10, b=0), hovermode='x unified', yaxis_title="Growth (%)")
+            st.plotly_chart(fig_comp, use_container_width=True)
+            
+        with c2:
+            st.markdown("##### Valuation Benchmarking")
+            st.dataframe(comp_df, hide_index=True, use_container_width=True)
+            
+            # FINAL SENTIMENT CALCULATION
+            # We combine Media Sentiment (avg_score) with Market Performance
+            ivt_growth = comp_hist['Invicta (IVT)'].iloc[-1]
+            
+            total_score = (avg_score * 50) + (ivt_growth * 0.5) # Weighted score
+            
+            st.markdown("---")
+            st.markdown("##### 🤖 The AI Verdict")
+            
+            if total_score > 10:
+                verdict = "STRONG BUY / BULLISH"
+                color = "green"
+                reason = "Both media sentiment and relative market performance are positive."
+            elif total_score > 0:
+                verdict = "HOLD / MODERATE"
+                color = "orange"
+                reason = "Market performance is stable, but media sentiment is mixed."
+            else:
+                verdict = "SELL / BEARISH"
+                color = "red"
+                reason = "Underperformance relative to peers and negative media sentiment."
+                
+            st.markdown(f"### Total Sentiment Score: :{color}[{verdict}]")
+            st.caption(f"Based on Media Analysis ({avg_score:.2f}) and Competitor Benchmarking.")
+            st.success(reason)
 
 if __name__ == "__main__":
     main()
