@@ -236,3 +236,11 @@ def main():
                 st.info(f"💡 **AI Logic:** {row['Explanation']}")
                 
                 # Show the preview text (Scraped or Snippet)
+                st.markdown(f"**Article Preview:** _{row['snippet']}_")
+                
+                st.markdown(f"[Read Original Source]({row['link']})")
+    else:
+        st.write("No news data found.")
+
+if __name__ == "__main__":
+    main()
