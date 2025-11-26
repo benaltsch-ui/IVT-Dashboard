@@ -6,7 +6,8 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
 import datetime
-import trafilatura # <--- Specialized News Scraper
+import requests
+import re
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", page_icon="🏭")
@@ -17,8 +18,7 @@ def load_sentiment_resources():
     nltk.download('vader_lexicon', quiet=True)
     sia = SentimentIntensityAnalyzer()
     
-    # --- TEACH THE AI FINANCIAL CONTEXT ---
-    # We update the dictionary so it understands stock market slang
+    # Financial Dictionary Update (Teach AI that 'shoot up' is good)
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -31,20 +31,25 @@ def load_sentiment_resources():
 
 sia = load_sentiment_resources()
 
-# --- ADVANCED SCRAPER ---
+# --- NEW SCRAPER (JINA AI PROXY) ---
 def get_full_article_text(url):
     """
-    Uses Trafilatura to fetch article content. 
-    It is much better at bypassing bot detection than standard requests.
+    Prefixes URL with https://r.jina.ai/ to use their reader engine.
+    This bypasses many standard bot blocks.
     """
     try:
-        # Download the HTML
-        downloaded = trafilatura.fetch_url(url)
+        api_url = f"https://r.jina.ai/{url}"
+        headers = {"User-Agent": "Mozilla/5.0"}
         
-        if downloaded:
-            # Extract only the main article text (removes ads, menus, popups)
-            text = trafilatura.extract(downloaded)
-            if text and len(text) > 200:
+        # Timeout increased to 10s because Jina renders the page
+        response = requests.get(api_url, headers=headers, timeout=10)
+        
+        if response.status_code == 200:
+            text = response.text
+            # Basic cleaning of the Markdown response
+            if "Just a moment" in text or "Access denied" in text:
+                return None
+            if len(text) > 400: # Ensure we got a real article
                 return text
     except:
         pass
@@ -52,31 +57,25 @@ def get_full_article_text(url):
 
 # --- SENTIMENT LOGIC ---
 def analyze_content(text, method="Snippet"):
-    # 1. Calculate Score
+    # 1. Score
     score = sia.polarity_scores(text)['compound']
     
-    # 2. Assign Label
+    # 2. Label
     if score >= 0.05: label, icon = "Positive", "🟢"
     elif score <= -0.05: label, icon = "Negative", "🔴"
     else: label, icon = "Neutral", "⚪"
     
-    # 3. Extract Drivers (Why did it get this score?)
+    # 3. Explain Drivers
     words = text.lower().split()
     drivers = []
-    
     for word in words:
-        clean_word = word.strip('.,!?"\'')
-        # Check if the word is in our dictionary
+        clean_word = word.strip('.,!?"\'*#') # Strip markdown chars too
         if clean_word in sia.lexicon:
             val = sia.lexicon[clean_word]
-            # Only pick "Strong" words to show the user
             if abs(val) >= 1.0: 
                 drivers.append((clean_word, val))
     
-    # Sort by impact (High sentiment words first)
     drivers.sort(key=lambda x: abs(x[1]), reverse=True)
-    
-    # Get top 5 unique keywords
     unique_drivers = list(set([x[0] for x in drivers]))[:5]
     
     if unique_drivers:
@@ -96,54 +95,49 @@ def get_market_data(ticker):
 
 @st.cache_data(ttl=3600)
 def get_live_news_deep(query):
-    # Google News RSS Search
     encoded = query.replace(" ", "%20")
     rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
     
     feed = feedparser.parse(rss_url)
-    
     if not feed.entries: return []
     
     news_items = []
     
-    # Progress Bar Setup
-    progress_text = "Reading articles... Please wait."
+    # Limit to 5 articles because Jina takes a moment to process
+    progress_text = "AI is reading full articles..."
     my_bar = st.progress(0, text=progress_text)
-    total_articles = min(len(feed.entries), 6) # Limit to 6 for speed
+    total = min(len(feed.entries), 5) 
     
-    for i, entry in enumerate(feed.entries[:6]):
-        # Update progress
-        my_bar.progress((i + 1) / total_articles, text=f"Reading article {i+1} of {total_articles}")
+    for i, entry in enumerate(feed.entries[:5]):
+        my_bar.progress((i + 1) / total, text=f"Analyzing: {entry.title[:30]}...")
         
-        # 1. Attempt to Read Full Article
+        # 1. Try Jina Proxy
         full_text = get_full_article_text(entry.link)
         
         if full_text:
-            # SUCCESS: We have the body text
             score, label, icon, expl = analyze_content(full_text, "Full Text")
-            snippet = full_text[:300] + "..." # Longer preview
-            source_method = "Full Article Read"
+            # Create a clean preview (remove markdown links)
+            clean_preview = re.sub(r'\[.*?\]\(.*?\)', '', full_text)[:300].replace('\n', ' ') + "..."
+            method_badge = "✅ Full Article (Jina AI)"
         else:
-            # FAIL: Fallback to RSS description
+            # Fallback
             raw_summary = entry.get('description', '') or entry.title
-            # Clean HTML from summary
-            import re
             clean_summary = re.sub('<.*?>', '', raw_summary)
-            score, label, icon, expl = analyze_content(clean_summary, "Headline/Snippet")
-            snippet = clean_summary
-            source_method = "Snippet (Site Blocked)"
+            score, label, icon, expl = analyze_content(clean_summary, "Headline Only")
+            clean_preview = clean_summary
+            method_badge = "⚠️ Summary Only (Blocked)"
 
         news_items.append({
             "title": entry.title,
             "link": entry.link,
             "source": entry.source.title if hasattr(entry, 'source') else "News",
             "date": entry.published[:16],
-            "snippet": snippet,
+            "snippet": clean_preview,
             "Sentiment": label,
             "Icon": icon,
             "Score": score,
             "Explanation": expl,
-            "Method": source_method
+            "Method": method_badge
         })
         
     my_bar.empty()
@@ -153,7 +147,7 @@ def get_live_news_deep(query):
 def main():
     st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
     
-    # 1. MARKET DATA
+    # 1. Market Data
     history, info = get_market_data("IVT.JO")
     if not history.empty:
         curr = history['Close'].iloc[-1]
@@ -166,33 +160,29 @@ def main():
         fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0))
         st.plotly_chart(fig, use_container_width=True)
     
-    # 2. NEWS
+    # 2. News Data
     st.divider()
     st.subheader("📰 Deep News Reader")
-    st.info("The system now specifically scans for financial terms (e.g., 'shoot up' = Positive).")
+    st.caption("Using Jina AI to bypass basic paywalls and read full context.")
     
     news = get_live_news_deep("Invicta Holdings Limited")
     if not news:
-        st.warning("No direct news found. Scanning sector peers...")
         news = get_live_news_deep("JSE Industrial Engineering")
-    
+        
     if news:
         df = pd.DataFrame(news)
         avg = df['Score'].mean()
-        
-        st.metric("Aggregate Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
         
         for i, row in df.iterrows():
             with st.expander(f"{row['Icon']} {row['title']}"):
-                
-                # Dynamic Badge based on scrape success
                 if "Full Article" in row['Method']:
-                    st.success(f"✅ AI successfully read the full article.")
+                    st.success(row['Method'])
                 else:
-                    st.warning(f"⚠️ Access Denied by Publisher. AI fell back to analyzing the summary.")
+                    st.warning(row['Method'])
                 
                 st.info(f"💡 {row['Explanation']}")
-                st.markdown(f"_{row['snippet']}_")
+                st.markdown(f"**Preview:** {row['snippet']}")
                 st.markdown(f"[Read Source]({row['link']})")
 
 if __name__ == "__main__":
