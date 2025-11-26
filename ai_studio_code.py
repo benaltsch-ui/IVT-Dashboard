@@ -18,7 +18,7 @@ def load_sentiment_resources():
     nltk.download('punkt', quiet=True) # Required for newspaper3k
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Dictionary (The "Brain" Upgrade)
+    # Financial Dictionary (Teaching the AI market terms)
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -35,7 +35,6 @@ sia = load_sentiment_resources()
 def get_article_content(url):
     """
     Uses newspaper3k to download and parse the article.
-    Newspaper3k is smarter at extracting just the text body.
     """
     try:
         article = Article(url)
@@ -73,7 +72,10 @@ def analyze_content(text, method="Snippet"):
     drivers.sort(key=lambda x: abs(x[1]), reverse=True)
     unique_drivers = list(set([x[0] for x in drivers]))[:5]
     
-    explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers]) if unique_drivers else f"Based on {method}."
+    if unique_drivers:
+        explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers])
+    else:
+        explanation = f"Based on {method}."
         
     return score, label, icon, explanation
 
@@ -88,9 +90,14 @@ def get_market_data(ticker):
 @st.cache_data(ttl=3600)
 def get_live_news_duckduckgo(query):
     """
-    Uses DuckDuckGo to get DIRECT links (bypassing Google Redirects).
+    Uses DuckDuckGo to get DIRECT links.
     """
-    results = DDGS().news(keywords=f"{query} South Africa", region="za-en", safesearch="off", max_results=5)
+    # DDGS allows us to search for news
+    try:
+        results = DDGS().news(keywords=f"{query} South Africa", region="za-en", safesearch="off", max_results=5)
+    except Exception as e:
+        st.error(f"Search Error: {e}")
+        return []
     
     news_items = []
     
@@ -102,23 +109,90 @@ def get_live_news_duckduckgo(query):
         return []
 
     for i, result in enumerate(results):
-        my_bar.progress((i + 1) / len(results), text=f"Reading: {result['title'][:20]}...")
+        my_bar.progress((i + 1) / len(results), text=f"Reading: {result.get('title', 'Article')[:20]}...")
         
         # DuckDuckGo gives us a 'url' key which is the REAL link.
-        direct_url = result['url']
+        direct_url = result.get('url', '')
         
         # 1. Try to Scrape Full Text
-        full_text = get_article_content(direct_url)
+        full_text = None
+        if direct_url:
+            full_text = get_article_content(direct_url)
         
         if full_text:
             score, label, icon, expl = analyze_content(full_text, "Full Article Text")
             snippet = full_text[:300] + "..."
             method = "✅ Full Text Read"
         else:
-            # Fallback to the snippet DDG provides (usually better than RSS)
-            fallback_text = f"{result['title']}. {result['body']}"
+            # Fallback to the snippet
+            fallback_text = f"{result.get('title', '')}. {result.get('body', '')}"
             score, label, icon, expl = analyze_content(fallback_text, "Search Snippet")
-            snippet = result['body']
+            snippet = result.get('body', 'No preview available')
             method = "⚠️ Snippet Only (Blocked)"
 
+        # --- THIS WAS THE BLOCK CAUSING ERRORS BEFORE ---
         news_items.append({
+            "title": result.get('title', 'Unknown Title'),
+            "link": direct_url,
+            "source": result.get('source', 'News'),
+            "date": result.get('date', ''),
+            "snippet": snippet,
+            "Sentiment": label,
+            "Icon": icon,
+            "Score": score,
+            "Explanation": expl,
+            "Method": method
+        })
+        # ------------------------------------------------
+        
+    my_bar.empty()
+    return news_items
+
+# --- MAIN APP ---
+def main():
+    st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
+    
+    # 1. Market Data
+    history, info = get_market_data("IVT.JO")
+    if not history.empty:
+        curr = history['Close'].iloc[-1]
+        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Price (ZAR)", f"{curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        
+        fig = go.Figure(data=[go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'])])
+        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 2. News Data
+    st.divider()
+    st.subheader("📰 Deep News Reader")
+    st.caption("Powered by DuckDuckGo Direct Links & Newspaper3k")
+    
+    # Search for Invicta
+    news = get_live_news_duckduckgo("Invicta Holdings Limited")
+    
+    # Fallback if Invicta has no news today
+    if not news:
+        st.warning("No direct news found for Invicta. Checking Industrial Sector...")
+        news = get_live_news_duckduckgo("JSE Industrial Engineering")
+        
+    if news:
+        df = pd.DataFrame(news)
+        avg = df['Score'].mean()
+        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        
+        for i, row in df.iterrows():
+            with st.expander(f"{row['Icon']} {row['title']}"):
+                if "Full Text" in row['Method']:
+                    st.success(row['Method'])
+                else:
+                    st.warning(row['Method'])
+                
+                st.info(f"💡 {row['Explanation']}")
+                st.markdown(f"**Preview:** {row['snippet']}")
+                st.markdown(f"[Read Source]({row['link']})")
+
+if __name__ == "__main__":
+    main()
