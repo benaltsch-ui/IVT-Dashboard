@@ -6,9 +6,7 @@ import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
 import datetime
-import requests
-from bs4 import BeautifulSoup
-import re
+import trafilatura # <--- Specialized News Scraper
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", page_icon="🏭")
@@ -18,86 +16,73 @@ st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", 
 def load_sentiment_resources():
     nltk.download('vader_lexicon', quiet=True)
     sia = SentimentIntensityAnalyzer()
+    
+    # --- TEACH THE AI FINANCIAL CONTEXT ---
+    # We update the dictionary so it understands stock market slang
+    financial_lexicon = {
+        'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
+        'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
+        'dividend': 2.0, 'earnings': 1.5, 'profit': 2.0, 'growth': 2.0,
+        'resilient': 2.0, 'strong': 2.0, 'up': 1.0, 'down': -1.0,
+        'challenging': -1.0, 'headwinds': -1.5, 'uncertainty': -1.0
+    }
+    sia.lexicon.update(financial_lexicon)
     return sia
 
 sia = load_sentiment_resources()
 
-# --- WEB SCRAPER ENGINE ---
-def scrape_full_text(url):
+# --- ADVANCED SCRAPER ---
+def get_full_article_text(url):
     """
-    Visits the URL and attempts to extract the main article body.
-    Includes headers to mimic a real browser to avoid being blocked.
+    Uses Trafilatura to fetch article content. 
+    It is much better at bypassing bot detection than standard requests.
     """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-    }
-    
     try:
-        # Timeout set to 3 seconds to keep app snappy
-        response = requests.get(url, headers=headers, timeout=3, allow_redirects=True)
+        # Download the HTML
+        downloaded = trafilatura.fetch_url(url)
         
-        # If successfully downloaded
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Remove script and style elements (junk)
-            for script in soup(["script", "style", "nav", "footer", "header"]):
-                script.decompose()
-            
-            # Extract text from paragraph tags (most articles use <p>)
-            paragraphs = [p.get_text() for p in soup.find_all('p')]
-            full_text = ' '.join(paragraphs)
-            
-            # Clean up whitespace
-            full_text = ' '.join(full_text.split())
-            
-            # Validation: If text is too short, it's likely a captcha or paywall
-            if len(full_text) < 200:
-                return None
-                
-            return full_text
-            
-    except Exception as e:
-        # If scraping fails, return None to trigger fallback
-        return None
-        
+        if downloaded:
+            # Extract only the main article text (removes ads, menus, popups)
+            text = trafilatura.extract(downloaded)
+            if text and len(text) > 200:
+                return text
+    except:
+        pass
     return None
 
 # --- SENTIMENT LOGIC ---
 def analyze_content(text, method="Snippet"):
-    """
-    Analyzes text and returns: Score, Label, Icon, Explanation
-    """
-    # VADER Scoring
+    # 1. Calculate Score
     score = sia.polarity_scores(text)['compound']
     
-    # Labeling
+    # 2. Assign Label
     if score >= 0.05: label, icon = "Positive", "🟢"
     elif score <= -0.05: label, icon = "Negative", "🔴"
     else: label, icon = "Neutral", "⚪"
     
-    # Keyword Extraction (Why is it Pos/Neg?)
+    # 3. Extract Drivers (Why did it get this score?)
     words = text.lower().split()
     drivers = []
     
-    # Check words against VADER dictionary
     for word in words:
         clean_word = word.strip('.,!?"\'')
+        # Check if the word is in our dictionary
         if clean_word in sia.lexicon:
             val = sia.lexicon[clean_word]
-            # We filter for 'strong' emotional words to make the summary useful
-            if abs(val) > 1.0: 
+            # Only pick "Strong" words to show the user
+            if abs(val) >= 1.0: 
                 drivers.append((clean_word, val))
     
-    # Sort by impact
+    # Sort by impact (High sentiment words first)
     drivers.sort(key=lambda x: abs(x[1]), reverse=True)
     
-    # Create Explanation String
-    unique_drivers = list(set([x[0] for x in drivers]))[:5] # Top 5 unique words
+    # Get top 5 unique keywords
+    unique_drivers = list(set([x[0] for x in drivers]))[:5]
+    
     if unique_drivers:
         explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers])
     else:
-        explanation = f"Based on {method}. No strong emotional keywords found."
+        explanation = f"Based on {method}. (No strong keywords detected)"
         
     return score, label, icon, explanation
 
@@ -105,142 +90,110 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker):
     stock = yf.Ticker(ticker)
     try:
-        history = stock.history(period="1y")
-        info = stock.info
+        return stock.history(period="1y"), stock.info
     except:
-        history = pd.DataFrame()
-        info = {}
-    return history, info
+        return pd.DataFrame(), {}
 
 @st.cache_data(ttl=3600)
 def get_live_news_deep(query):
-    encoded_query = query.replace(" ", "%20")
-    rss_url = f"https://news.google.com/rss/search?q={encoded_query}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
+    # Google News RSS Search
+    encoded = query.replace(" ", "%20")
+    rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
     
     feed = feedparser.parse(rss_url)
+    
+    if not feed.entries: return []
+    
     news_items = []
     
-    if not feed.entries:
-        return []
-
-    # Process Top 8 articles (Reduced from 12 to save time on scraping)
-    progress_bar = st.progress(0)
-    total = min(len(feed.entries), 8)
+    # Progress Bar Setup
+    progress_text = "Reading articles... Please wait."
+    my_bar = st.progress(0, text=progress_text)
+    total_articles = min(len(feed.entries), 6) # Limit to 6 for speed
     
-    for i, entry in enumerate(feed.entries[:8]):
-        # Update progress bar
-        progress_bar.progress((i + 1) / total)
+    for i, entry in enumerate(feed.entries[:6]):
+        # Update progress
+        my_bar.progress((i + 1) / total_articles, text=f"Reading article {i+1} of {total_articles}")
         
-        # 1. Try to scrape Full Text
-        full_text = scrape_full_text(entry.link)
+        # 1. Attempt to Read Full Article
+        full_text = get_full_article_text(entry.link)
         
-        # 2. Analyze
         if full_text:
-            # If scrape worked, analyze full text
-            score, label, icon, explanation = analyze_content(full_text, method="Full Article Text")
-            snippet = full_text[:300] + "..." # Show first 300 chars as preview
+            # SUCCESS: We have the body text
+            score, label, icon, expl = analyze_content(full_text, "Full Text")
+            snippet = full_text[:300] + "..." # Longer preview
+            source_method = "Full Article Read"
         else:
-            # Fallback to RSS snippet
+            # FAIL: Fallback to RSS description
             raw_summary = entry.get('description', '') or entry.title
+            # Clean HTML from summary
+            import re
             clean_summary = re.sub('<.*?>', '', raw_summary)
-            score, label, icon, explanation = analyze_content(clean_summary, method="Headline/Snippet")
+            score, label, icon, expl = analyze_content(clean_summary, "Headline/Snippet")
             snippet = clean_summary
+            source_method = "Snippet (Site Blocked)"
 
         news_items.append({
-            "date": entry.published[:16],
             "title": entry.title,
-            "snippet": snippet,
             "link": entry.link,
-            "source": entry.source.title if hasattr(entry, 'source') else "Google News",
+            "source": entry.source.title if hasattr(entry, 'source') else "News",
+            "date": entry.published[:16],
+            "snippet": snippet,
             "Sentiment": label,
             "Icon": icon,
             "Score": score,
-            "Explanation": explanation
+            "Explanation": expl,
+            "Method": source_method
         })
-    
-    progress_bar.empty() # Remove bar when done
+        
+    my_bar.empty()
     return news_items
 
 # --- MAIN APP ---
 def main():
-    st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment Monitor")
-    st.markdown("This tool uses **AI Web Scraping** to read full news articles for deeper sentiment context.")
-    st.divider()
-
-    # Sidebar
-    st.sidebar.header("Configuration")
-    ticker = st.sidebar.text_input("JSE Ticker", "IVT.JO")
+    st.title("🏭 Invicta Holdings (IVT) | Deep Sentiment")
     
-    # 1. FETCH DATA
-    history, info = get_market_data(ticker)
-    
-    st.write("🔄 **Scanning and reading news articles... (This takes a few seconds)**")
-    
-    # We run the deep search here
-    news_data = get_live_news_deep("Invicta Holdings Limited")
-    if not news_data:
-            st.warning("No direct news found. Scanning sector peers...")
-            news_data = get_live_news_deep("JSE Industrial Engineering")
-
-    # 2. PROCESS DATAFRAME
-    if news_data:
-        df_news = pd.DataFrame(news_data)
-        avg_sentiment = df_news['Score'].mean()
-    else:
-        df_news = pd.DataFrame()
-        avg_sentiment = 0
-
-    # 3. KPI DISPLAY
+    # 1. MARKET DATA
+    history, info = get_market_data("IVT.JO")
     if not history.empty:
-        current_price = history['Close'].iloc[-1]
-        prev_price = history['Close'].iloc[-2]
-        delta = ((current_price - prev_price) / prev_price) * 100
+        curr = history['Close'].iloc[-1]
+        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Price (ZAR)", f"{curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
         
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Share Price (ZAR)", f"{current_price:.2f}", f"{delta:.2f}%")
-        col2.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
-        col3.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        fig = go.Figure(data=[go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'])])
+        fig.update_layout(height=300, margin=dict(l=0,r=0,t=10,b=0))
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 2. NEWS
+    st.divider()
+    st.subheader("📰 Deep News Reader")
+    st.info("The system now specifically scans for financial terms (e.g., 'shoot up' = Positive).")
+    
+    news = get_live_news_deep("Invicta Holdings Limited")
+    if not news:
+        st.warning("No direct news found. Scanning sector peers...")
+        news = get_live_news_deep("JSE Industrial Engineering")
+    
+    if news:
+        df = pd.DataFrame(news)
+        avg = df['Score'].mean()
         
-        sent_label = "Bullish" if avg_sentiment > 0.05 else "Bearish" if avg_sentiment < -0.05 else "Neutral"
-        col4.metric("Deep Sentiment", sent_label, f"{avg_sentiment:.2f} Score")
-    else:
-        st.error("Check Ticker Symbol.")
-
-    # 4. CHARTS
-    c1, c2 = st.columns([2, 1])
-    with c1:
-        st.subheader("📈 Price History (1 Year)")
-        if not history.empty:
-            fig = go.Figure(data=[go.Candlestick(x=history.index,
-                            open=history['Open'], high=history['High'],
-                            low=history['Low'], close=history['Close'])])
-            fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
-            st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        st.subheader("🧠 Sentiment Split")
-        if not df_news.empty:
-            counts = df_news['Sentiment'].value_counts()
-            fig_pie = go.Figure(data=[go.Pie(labels=counts.index, values=counts.values, hole=.4)])
-            fig_pie.update_traces(marker=dict(colors=['#00CC96', '#EF553B', '#AB63FA']))
-            fig_pie.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
-            st.plotly_chart(fig_pie, use_container_width=True)
-
-    # 5. DEEP NEWS FEED
-    st.subheader("📰 Deep Article Analysis")
-    if not df_news.empty:
-        for index, row in df_news.iterrows():
+        st.metric("Aggregate Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        
+        for i, row in df.iterrows():
             with st.expander(f"{row['Icon']} {row['title']}"):
-                st.caption(f"**Source:** {row['source']} | **Date:** {row['date']}")
                 
-                # Show the Logic
-                st.info(f"💡 **AI Logic:** {row['Explanation']}")
+                # Dynamic Badge based on scrape success
+                if "Full Article" in row['Method']:
+                    st.success(f"✅ AI successfully read the full article.")
+                else:
+                    st.warning(f"⚠️ Access Denied by Publisher. AI fell back to analyzing the summary.")
                 
-                # Show the preview text (Scraped or Snippet)
-                st.markdown(f"**Article Preview:** _{row['snippet']}_")
-                
-                st.markdown(f"[Read Original Source]({row['link']})")
-    else:
-        st.write("No news data found.")
+                st.info(f"💡 {row['Explanation']}")
+                st.markdown(f"_{row['snippet']}_")
+                st.markdown(f"[Read Source]({row['link']})")
 
 if __name__ == "__main__":
     main()
