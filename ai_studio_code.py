@@ -172,4 +172,55 @@ def main():
     history, info = get_market_data("IVT.JO")
     
     if not history.empty:
-        curr = history['Close'].i
+        curr = history['Close'].iloc[-1]
+        prev = history['Close'].iloc[-2]
+        pct = ((curr - prev) / prev) * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Price", f"R {curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        
+        # Charts
+        st.subheader("Price Performance & Volume")
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
+        colors = ['red' if row['Open'] - row['Close'] > 0 else 'green' for index, row in history.iterrows()]
+        fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
+        fig.update_layout(height=500, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=False, hovermode='x unified')
+        fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
+        fig.update_yaxes(title_text="<b>Volume</b>", row=2, col=1)
+        fig.update_xaxes(title_text="<b>Date</b>", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 2. NEWS
+    st.divider()
+    st.subheader("📰 Deep News Reader")
+    st.caption("Latest 10 Articles | Dates & Links verified")
+    
+    news = get_google_news("Invicta Holdings Limited")
+    if not news:
+        st.warning("No direct news found. Checking Sector...")
+        news = get_google_news("JSE Industrial Engineering")
+        
+    if news:
+        df = pd.DataFrame(news)
+        avg = df['Score'].mean()
+        st.metric("Sentiment Score", f"{avg:.2f}", delta="Bullish" if avg > 0.05 else "Bearish" if avg < -0.05 else "Neutral")
+        
+        for i, row in df.iterrows():
+            with st.expander(f"{row['Icon']} {row['title']}"):
+                # Top Row: Source and Date
+                m1, m2 = st.columns([3, 1])
+                m1.caption(f"**Source:** {row['source']} | **Published:** {row['date']}")
+                m2.caption(f"**{row['Method']}**")
+                
+                # Content
+                st.info(f"💡 {row['Explanation']}")
+                st.markdown(f"**Preview:** {row['snippet']}")
+                st.markdown(f"🔗 [**Click to Read Full Article**]({row['link']})")
+    else:
+        st.write("No news found.")
+
+if __name__ == "__main__":
+    main()
