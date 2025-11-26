@@ -18,7 +18,7 @@ def load_sentiment_model():
 
 sia = load_sentiment_model()
 
-@st.cache_data(ttl=900) # Cache data for 15 minutes to prevent blocking
+@st.cache_data(ttl=900) # Cache data for 15 minutes
 def get_market_data(ticker):
     stock = yf.Ticker(ticker)
     # Get 1 year history
@@ -32,20 +32,19 @@ def get_market_data(ticker):
 
 @st.cache_data(ttl=3600) # Cache news for 1 hour
 def get_live_news(query):
-    # Google News RSS Feed (Free & Reliable)
+    # Google News RSS Feed
     encoded_query = query.replace(" ", "%20")
     rss_url = f"https://news.google.com/rss/search?q={encoded_query}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
     
     feed = feedparser.parse(rss_url)
     
     news_items = []
-    # If no news found, provide a fallback message
     if not feed.entries:
         return []
 
-    for entry in feed.entries[:10]: # Limit to top 10 recent
+    for entry in feed.entries[:10]: # Limit to top 10
         news_items.append({
-            "date": entry.published[:16], # Truncate time for cleaner look
+            "date": entry.published[:16],
             "title": entry.title,
             "link": entry.link,
             "source": entry.source.title if hasattr(entry, 'source') else "Google News"
@@ -72,10 +71,8 @@ def main():
     with st.spinner('Connecting to JSE & Google News...'):
         history, info = get_market_data(ticker)
         
-        # We search for "Invicta Holdings" AND "JSE" to filter noise
+        # Search query logic
         news_data = get_live_news("Invicta Holdings Limited")
-        
-        # Fallback if no news found specifically for Invicta (Common for mid-cap stocks)
         if not news_data:
              st.warning("No immediate news found for Invicta. Showing sector peers (Industrial Engineering).")
              news_data = get_live_news("JSE Industrial Engineering sector")
@@ -92,36 +89,41 @@ def main():
         avg_sentiment = 0
 
     # 3. KPI DISPLAY
-    current_price = history['Close'].iloc[-1]
-    prev_price = history['Close'].iloc[-2]
-    delta = ((current_price - prev_price) / prev_price) * 100
-    
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Share Price (ZAR)", f"{current_price:.2f}", f"{delta:.2f}%")
-    col2.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B") # Convert to Billions
-    col3.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
-    
-    # Sentiment KPI
-    sent_label = "Bullish" if avg_sentiment > 0.05 else "Bearish" if avg_sentiment < -0.05 else "Neutral"
-    col4.metric("Media Sentiment", sent_label, f"{avg_sentiment:.2f} Score")
+    if not history.empty:
+        current_price = history['Close'].iloc[-1]
+        prev_price = history['Close'].iloc[-2]
+        delta = ((current_price - prev_price) / prev_price) * 100
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Share Price (ZAR)", f"{current_price:.2f}", f"{delta:.2f}%")
+        col2.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        col3.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        
+        sent_label = "Bullish" if avg_sentiment > 0.05 else "Bearish" if avg_sentiment < -0.05 else "Neutral"
+        col4.metric("Media Sentiment", sent_label, f"{avg_sentiment:.2f} Score")
+    else:
+        st.error("Could not retrieve market data. Please check Ticker symbol.")
 
     # 4. CHARTS
     c1, c2 = st.columns([2, 1])
     
     with c1:
         st.subheader("📈 Price History (1 Year)")
-        fig = go.Figure(data=[go.Candlestick(x=history.index,
-                        open=history['Open'], high=history['High'],
-                        low=history['Low'], close=history['Close'])])
-        fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
-        st.plotly_chart(fig, use_container_width=True)
+        if not history.empty:
+            fig = go.Figure(data=[go.Candlestick(x=history.index,
+                            open=history['Open'], high=history['High'],
+                            low=history['Low'], close=history['Close'])])
+            fig.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0))
+            st.plotly_chart(fig, use_container_width=True)
         
     with c2:
         st.subheader("🧠 Sentiment Split")
         if not df_news.empty:
             counts = df_news['Sentiment'].value_counts()
             fig_pie = go.Figure(data=[go.Pie(labels=counts.index, values=counts.values, hole=.4)])
-            fig_pie.update_colors(marker=dict(colors=['#00CC96', '#EF553B', '#AB63FA']))
+            # --- FIX IS HERE ---
+            fig_pie.update_traces(marker=dict(colors=['#00CC96', '#EF553B', '#AB63FA']))
+            # -------------------
             fig_pie.update_layout(height=350, margin=dict(l=0,r=0,t=20,b=0), showlegend=True)
             st.plotly_chart(fig_pie, use_container_width=True)
         else:
