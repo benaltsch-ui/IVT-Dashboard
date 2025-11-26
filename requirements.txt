@@ -3,7 +3,7 @@ yfinance
 pandas
 plotly
 nltk
-duckduckgo-search
+feedparser
 newspaper3k
 lxml_html_clean
 requests
