@@ -180,6 +180,11 @@ def get_competitor_financials():
             pe = info.get('trailingPE', 0)
             m_cap = (info.get('marketCap', 0) or 0) / 1e9
             
+            # Additional Ratios for Comparison
+            gross_margin = info.get('grossMargins', 0)
+            op_margin = info.get('operatingMargins', 0)
+            roe = info.get('returnOnEquity', 0)
+            
             div_rate = info.get('dividendRate', 0)
             if div_rate and current_price > 0:
                 calc_yield = (div_rate / current_price) * 100
@@ -192,6 +197,9 @@ def get_competitor_financials():
                 "P/E Ratio": pe,
                 "Div Yield (%)": calc_yield,
                 "Market Cap (B)": m_cap,
+                "Gross Margin (%)": gross_margin * 100 if gross_margin else 0,
+                "Op Margin (%)": op_margin * 100 if op_margin else 0,
+                "ROE (%)": roe * 100 if roe else 0,
                 "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
             })
         except:
@@ -333,7 +341,7 @@ def main():
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # --- NEW FIXED SUMMARY LEGEND ---
+                # FIXED LEGEND
                 st.markdown("### 🔑 Quick Chart Legend")
                 l1, l2, l3, l4 = st.columns(4)
                 l1.info("**SMA (Trend)**\n\nPrice > Lines = 🟢 Bullish\n\nPrice < Lines = 🔴 Bearish")
@@ -434,29 +442,25 @@ def main():
 
             st.divider()
 
-            # 2. INTERIM (SEPTEMBER) LOGIC
-            st.markdown("### ⏱️ Year to Date / Interim (September Trend)")
+            # 2. INTERIM (SEPTEMBER) LOGIC (With Fallback Removal)
             
             # Search for September column
             sept_col = None
             if not quarterly_fin.empty:
                 for col in quarterly_fin.columns:
-                    # Looking for Month 9 (Sept)
                     if isinstance(col, pd.Timestamp) and col.month == 9:
                         sept_col = col
                         break
 
-            # If September data is found
+            # Only show if September data is found
             if sept_col:
+                st.markdown("### ⏱️ Year to Date / Interim (September Trend)")
                 st.caption(f"Showing Interim Data for: {sept_col.strftime('%B %Y')}")
                 q_metrics = ['Total Revenue', 'Net Income', 'Operating Income']
                 q_data = []
                 for m in q_metrics:
-                    # Get Value from Sept Column
                     q_curr = quarterly_fin.loc[m, sept_col] if m in quarterly_fin.index else 0
                     
-                    # Try to compare with Previous Interim (Sept last year) or Just Previous Quarter
-                    # Ideally we want year-on-year interim (Sept vs Sept)
                     prev_sept_col = None
                     for col in quarterly_fin.columns:
                         if isinstance(col, pd.Timestamp) and col.month == 9 and col.year == (sept_col.year - 1):
@@ -467,8 +471,7 @@ def main():
                         q_last = quarterly_fin.loc[m, prev_sept_col] if m in quarterly_fin.index else 0
                         compare_label = f"Sept {prev_sept_col.year}"
                     else:
-                        # Fallback to sequential previous if YoY not found
-                        q_last = 0 # Cannot accurately compare if we don't have history
+                        q_last = 0 
                         compare_label = "Prior Period"
 
                     if q_curr != 0:
@@ -482,20 +485,63 @@ def main():
                         })
                 st.dataframe(pd.DataFrame(q_data), use_container_width=True, hide_index=True)
             
-            else:
-                # FALLBACK (When Sept data is missing from API)
-                st.info("September Interim data not returned by Yahoo Finance API. Displaying Trailing 12 Months (TTM) as proxy.")
-                ttm_data = []
-                
-                rev_ttm = info.get('totalRevenue', 0)
-                rev_last = safe_get_financial_value(financials, 'Total Revenue', 0)
-                ttm_data.append({"Metric": "Revenue", "TTM (Rolling 12M)": format_large_number(rev_ttm), "Last Annual (Mar)": format_large_number(rev_last)})
-                
-                ebitda_ttm = info.get('ebitda', 0)
-                ebitda_last = safe_get_financial_value(financials, 'EBITDA', 0)
-                ttm_data.append({"Metric": "EBITDA", "TTM (Rolling 12M)": format_large_number(ebitda_ttm), "Last Annual (Mar)": format_large_number(ebitda_last)})
+            # Note: Removed the "else" fallback block entirely as requested.
 
-                st.dataframe(pd.DataFrame(ttm_data), use_container_width=True, hide_index=True)
+            st.divider()
+            
+            # 3. RATIO ANALYSIS (NEW)
+            c_r1, c_r2 = st.columns(2)
+            
+            with c_r1:
+                st.markdown("### 📉 Ratio Analysis: Year-over-Year")
+                if not financials.empty and financials.shape[1] >= 2:
+                    
+                    def calc_ratio(df, num, den, col):
+                        try:
+                            n = df.loc[num].iloc[col]
+                            d = df.loc[den].iloc[col]
+                            return (n / d) * 100 if d != 0 else 0
+                        except:
+                            return 0
+
+                    ratios_data = []
+                    
+                    # Gross Margin
+                    gm_curr = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 0)
+                    gm_prev = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 1)
+                    ratios_data.append({"Ratio": "Gross Margin", "Current (%)": f"{gm_curr:.2f}%", "Prior (%)": f"{gm_prev:.2f}%"})
+                    
+                    # Operating Margin
+                    om_curr = calc_ratio(financials, 'Operating Income', 'Total Revenue', 0)
+                    om_prev = calc_ratio(financials, 'Operating Income', 'Total Revenue', 1)
+                    ratios_data.append({"Ratio": "Operating Margin", "Current (%)": f"{om_curr:.2f}%", "Prior (%)": f"{om_prev:.2f}%"})
+
+                    # Net Margin
+                    nm_curr = calc_ratio(financials, 'Net Income', 'Total Revenue', 0)
+                    nm_prev = calc_ratio(financials, 'Net Income', 'Total Revenue', 1)
+                    ratios_data.append({"Ratio": "Net Margin", "Current (%)": f"{nm_curr:.2f}%", "Prior (%)": f"{nm_prev:.2f}%"})
+                    
+                    st.dataframe(pd.DataFrame(ratios_data), use_container_width=True, hide_index=True)
+                else:
+                    st.caption("Insufficient data for ratio analysis.")
+
+            with c_r2:
+                st.markdown("### 🏆 Peer Benchmarking: Efficiency")
+                with st.spinner("Compare with peers..."):
+                    comp_metrics, _ = get_competitor_financials()
+                
+                if not comp_metrics.empty:
+                    # Filter for just the ratio columns
+                    cols_to_show = ["Company", "Gross Margin (%)", "Op Margin (%)", "ROE (%)"]
+                    # Check if columns exist (safe check)
+                    valid_cols = [c for c in cols_to_show if c in comp_metrics.columns]
+                    
+                    # Format
+                    comp_metrics_style = comp_metrics[valid_cols].copy()
+                    for c in valid_cols[1:]:
+                        comp_metrics_style[c] = comp_metrics_style[c].apply(lambda x: f"{x:.2f}%")
+                        
+                    st.dataframe(comp_metrics_style, use_container_width=True, hide_index=True)
 
             # --- CHART ---
             if not financials.empty:
