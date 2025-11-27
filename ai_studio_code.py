@@ -339,6 +339,33 @@ def main():
                 fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
                 st.plotly_chart(fig, use_container_width=True)
+                
+                # --- LEGEND SECTION ---
+                with st.expander("📘 How to Read Technical Indicators (Legend)"):
+                    st.markdown("""
+                    ### 1. Trend Indicators (SMA)
+                    **Simple Moving Average (SMA):** The average price over a specific period.
+                    *   🔵 **50-Day SMA:** Represents the short-term trend.
+                    *   🔴 **200-Day SMA:** Represents the long-term trend.
+                    *   **Bullish:** Price > SMA lines. **Bearish:** Price < SMA lines.
+                    *   **Golden Cross:** When 50 SMA crosses *above* 200 SMA (Strong Buy).
+                    *   **Death Cross:** When 50 SMA crosses *below* 200 SMA (Strong Sell).
+
+                    ### 2. Momentum (RSI)
+                    **Relative Strength Index (0-100):** Measures the speed of price changes.
+                    *   🔴 **> 70 (Overbought):** Price has risen too fast, potential drop incoming.
+                    *   🟢 **< 30 (Oversold):** Price has fallen too fast, potential bounce incoming.
+                    *   ⚪ **30-70:** Neutral zone.
+
+                    ### 3. MACD (Trend & Momentum)
+                    **Moving Average Convergence Divergence:**
+                    *   **Positive Divergence:** The MACD line crosses *above* the Signal line (Bullish/Buy).
+                    *   **Negative Divergence:** The MACD line crosses *below* the Signal line (Bearish/Sell).
+
+                    ### 4. Volume
+                    *   **Green Bars:** Buying pressure (Price closed higher than it opened).
+                    *   **Red Bars:** Selling pressure (Price closed lower than it opened).
+                    """)
 
             with c_sidebar:
                 st.subheader("💡 AI Technical Verdict")
@@ -481,8 +508,6 @@ def main():
                 fin_T = financials.T.iloc[:4][::-1]
                 
                 # --- DATE FORMATTING LOGIC ---
-                # Yahoo Finance usually provides column names as Timestamps.
-                # We convert these to strings like "Mar 2023", "Mar 2024" to ensure the Year End is clear.
                 try:
                     formatted_dates = [d.strftime('%b %Y') if isinstance(d, pd.Timestamp) else str(d) for d in fin_T.index]
                 except:
