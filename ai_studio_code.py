@@ -23,7 +23,7 @@ def load_sentiment_resources():
     
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Dictionary
+    # Financial Dictionary (Teaching the AI market slang)
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -90,11 +90,8 @@ def get_market_data(ticker):
     except:
         return pd.DataFrame(), {}
 
-@st.cache_data(ttl=3600) # Cache financial comparison for 1 hour
+@st.cache_data(ttl=3600) 
 def get_competitor_financials():
-    """
-    Fetches and normalizes financial data for Invicta, Hudaco, and Barloworld.
-    """
     tickers = {
         "Invicta (IVT)": "IVT.JO",
         "Hudaco (HDC)": "HDC.JO",
@@ -107,19 +104,15 @@ def get_competitor_financials():
     for name, sym in tickers.items():
         try:
             stock = yf.Ticker(sym)
-            
-            # 1. Get History & Normalize
             hist = stock.history(period="1y")
             if not hist.empty:
                 start_price = hist['Close'].iloc[0]
-                # Calculate % Growth from start date
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
                 history_df[name] = hist['Growth']
                 current_price = hist['Close'].iloc[-1]
             else:
                 current_price = 0
 
-            # 2. Get Fundamentals
             info = stock.info
             metrics.append({
                 "Company": name,
@@ -213,7 +206,7 @@ def main():
         fig.update_yaxes(title_text="<b>Shares Traded</b>", row=2, col=1)
         st.plotly_chart(fig, use_container_width=True)
     
-    # 2. COMPETITOR FINANCIAL BENCHMARKING (NEW SECTION)
+    # 2. COMPETITOR FINANCIAL BENCHMARKING
     st.divider()
     st.subheader("📊 Financial Comparison vs. Competitors")
     st.caption("Comparing Invicta (IVT) against Hudaco (HDC) and Barloworld (BAW).")
@@ -228,41 +221,82 @@ def main():
             st.markdown("**1-Year Relative Performance (%)**")
             fig_rel = go.Figure()
             colors = {"Invicta (IVT)": "#1f77b4", "Hudaco (HDC)": "#d62728", "Barloworld (BAW)": "#2ca02c"}
-            
             for col in comp_history.columns:
                 width = 4 if "Invicta" in col else 2
-                fig_rel.add_trace(go.Scatter(
-                    x=comp_history.index, 
-                    y=comp_history[col], 
-                    mode='lines', 
-                    name=col,
-                    line=dict(width=width, color=colors.get(col, "gray"))
-                ))
+                fig_rel.add_trace(go.Scatter(x=comp_history.index, y=comp_history[col], mode='lines', name=col, line=dict(width=width, color=colors.get(col, "gray"))))
             fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0), hovermode='x unified', yaxis_title="Growth %")
             st.plotly_chart(fig_rel, use_container_width=True)
             
         with col_table:
             st.markdown("**Valuation Matrix**")
-            # Formatting the table nicely
             styled_df = comp_metrics.copy()
             styled_df['Price'] = styled_df['Price'].apply(lambda x: f"R {x:.2f}")
             styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
             styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
             styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
             styled_df['1Y Return (%)'] = styled_df['1Y Return (%)'].apply(lambda x: f"{x:+.2f}%")
-            
             st.dataframe(styled_df, hide_index=True, use_container_width=True)
-            
-            # Auto-Verdict
-            ivt_pe = comp_metrics.loc[comp_metrics['Company'].str.contains("Invicta"), 'P/E Ratio'].values[0]
-            avg_pe = comp_metrics['P/E Ratio'].mean()
-            
-            if ivt_pe < avg_pe:
-                st.success(f"**Undervalued:** Invicta's P/E ({ivt_pe:.2f}) is lower than the peer average ({avg_pe:.2f}).")
-            else:
-                st.warning(f"**Premium Valuation:** Invicta is trading at a higher P/E ({ivt_pe:.2f}) than the peer average.")
 
-    # 3. NEWS & SENTIMENT
+    # 3. STRATEGIC DEEP DIVE (New Section)
+    st.divider()
+    st.subheader("🔬 Strategic Deep Dive")
+    st.caption("Technicals, Currency Risk & Ownership Structure")
+    
+    tab1, tab2, tab3 = st.tabs(["⚡ Technical Signals (RSI)", "🇿🇦 Currency Correlation", "🏢 Major Holders"])
+    
+    with tab1:
+        # Calculate RSI
+        delta = history['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        history['RSI'] = 100 - (100 / (1 + rs))
+        current_rsi = history['RSI'].iloc[-1]
+        
+        c_rsi, c_advice = st.columns([1, 2])
+        with c_rsi:
+            st.metric("14-Day RSI", f"{current_rsi:.2f}")
+            if current_rsi > 70: st.error("⚠️ Overbought (>70)")
+            elif current_rsi < 30: st.success("✅ Oversold (<30)")
+            else: st.info("⚡ Neutral (30-70)")
+        with c_advice:
+            st.markdown("##### Interpretation")
+            if current_rsi > 70: st.write("Stock has risen fast. Potential pullback expected.")
+            elif current_rsi < 30: st.write("Stock sold off heavily. Potential buying opportunity.")
+            else: st.write("Stock trading in normal range.")
+
+        fig_rsi = go.Figure()
+        fig_rsi.add_trace(go.Scatter(x=history.index, y=history['RSI'], mode='lines', name='RSI', line=dict(color='purple')))
+        fig_rsi.add_hline(y=70, line_dash="dash", line_color="red")
+        fig_rsi.add_hline(y=30, line_dash="dash", line_color="green")
+        fig_rsi.update_layout(height=250, yaxis_title="RSI", margin=dict(l=0, r=0, t=10, b=0))
+        st.plotly_chart(fig_rsi, use_container_width=True)
+
+    with tab2:
+        st.markdown("**Invicta (Importer) vs. Rand Weakness**")
+        with st.spinner("Fetching Currency Data..."):
+            forex = yf.Ticker("ZAR=X").history(period="1y")
+        if not forex.empty:
+            hist_norm = ((history['Close'] - history['Close'].iloc[0]) / history['Close'].iloc[0]) * 100
+            forex_norm = ((forex['Close'] - forex['Close'].iloc[0]) / forex['Close'].iloc[0]) * 100
+            fig_corr = go.Figure()
+            fig_corr.add_trace(go.Scatter(x=history.index, y=hist_norm, mode='lines', name='Invicta Price', line=dict(color='#1f77b4', width=3)))
+            fig_corr.add_trace(go.Scatter(x=forex.index, y=forex_norm, mode='lines', name='USD/ZAR Rate', line=dict(color='orange', dash='dot')))
+            fig_corr.update_layout(height=350, yaxis_title="Relative Change (%)", hovermode="x unified")
+            st.plotly_chart(fig_corr, use_container_width=True)
+
+    with tab3:
+        try:
+            holders = yf.Ticker("IVT.JO").major_holders
+            if holders is not None:
+                holders.columns = ['Percentage', 'Category']
+                st.dataframe(holders, hide_index=True, use_container_width=True)
+            else:
+                st.warning("Data unavailable.")
+        except:
+            st.warning("Ownership data unavailable via API.")
+
+    # 4. NEWS & SENTIMENT
     st.divider()
     st.subheader("📰 Sentiment Analysis & Impact")
     
@@ -290,7 +324,7 @@ def main():
                     elif item['Score'] < -0.05: st.error(f"{item['Score']:.2f}")
                     else: st.warning("Neutral")
 
-    # 4. SENTIMENT BATTLE
+    # 5. SENTIMENT BATTLE
     st.divider()
     st.subheader("🏆 Sentiment Battle")
     
