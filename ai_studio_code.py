@@ -2,621 +2,311 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-from nltk.sentiment.vader import SentimentIntensityAnalyzer
+from plotly.subplots import make_subplots
 import nltk
+from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
 import requests
 import trafilatura
 from email.utils import parsedate_to_datetime
-from datetime import datetime, timezone
-from typing import Dict, List, Tuple
 
-# --------------------------------------------------
-# PAGE CONFIG
-# --------------------------------------------------
-st.set_page_config(
-    page_title="Invicta Holdings Live Dashboard",
-    layout="wide",
-    page_icon="🏭",
-)
+# --- CONFIGURATION ---
+st.set_page_config(page_title="Invicta Holdings Live Dashboard", layout="wide", page_icon="🏭")
 
-# --------------------------------------------------
-# LIQUID GLASS (GLASSMORPHISM) THEME
-# --------------------------------------------------
-st.markdown(
-    """
-<style>
-/* App background */
-.stApp {
-  background: radial-gradient(circle at top left, #1f2a3c 0%, #111827 40%, #020617 100%);
-  color: #e5e7eb;
-}
-
-/* Center block & spacing */
-.main .block-container {
-  padding-top: 2.5rem;
-  padding-bottom: 2.5rem;
-  max-width: 1150px;
-}
-
-/* Glass card wrapper */
-.glass-card {
-  background: rgba(15, 23, 42, 0.78);
-  border-radius: 24px;
-  padding: 1.5rem 1.75rem;
-  margin-bottom: 1.5rem;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  box-shadow: 0 18px 45px rgba(15, 23, 42, 0.85);
-  backdrop-filter: blur(18px);
-  -webkit-backdrop-filter: blur(18px);
-}
-
-/* Sidebar glass effect */
-[data-testid="stSidebar"] {
-  background: linear-gradient(160deg, rgba(15, 23, 42, 0.92), rgba(30, 64, 175, 0.85));
-  border-right: 1px solid rgba(148, 163, 184, 0.4);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-}
-
-/* Typography */
-h1, h2, h3, h4, h5, h6 {
-  color: #e5e7eb;
-}
-
-p, label, .stCaption, .stMarkdown {
-  color: #cbd5f5 !important;
-}
-
-/* Metrics */
-[data-testid="stMetricValue"] {
-  color: #f9fafb !important;
-  font-weight: 700;
-}
-
-[data-testid="stMetricLabel"] {
-  color: #9ca3af !important;
-}
-
-/* Dataframe glass */
-[data-testid="stDataFrame"] {
-  background: transparent !important;
-}
-
-/* Plotly chart background */
-.js-plotly-plot .plotly, .js-plotly-plot .plot-container {
-  background: transparent !important;
-}
-
-/* Buttons / radio / sliders accent */
-.stSlider > div > div > div > div {
-  background: linear-gradient(90deg, #38bdf8, #6366f1);
-}
-
-.stRadio > label, .stSelectbox > label, .stTextInput > label {
-  font-weight: 600;
-  color: #e5e7eb !important;
-}
-
-/* Divider */
-hr {
-  border: none;
-  border-top: 1px solid rgba(148, 163, 184, 0.4);
-}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# Convenience helpers for glass cards
-def glass_card_start():
-    st.markdown('<div class="glass-card">', unsafe_allow_html=True)
-
-
-def glass_card_end():
-    st.markdown('</div>', unsafe_allow_html=True)
-
-
-# --------------------------------------------------
-# CACHED RESOURCES
-# --------------------------------------------------
-@st.cache_resource(show_spinner=False)
-def get_vader_analyzer() -> SentimentIntensityAnalyzer:
-    """Load VADER model and extend it with a financial lexicon."""
-    nltk.download("vader_lexicon", quiet=True)
-    analyzer = SentimentIntensityAnalyzer()
-
-    finance_lexicon = {
-        "beat": 2.0,
-        "beats": 2.0,
-        "miss": -2.0,
-        "missed": -2.0,
-        "downgrade": -2.5,
-        "downgraded": -2.5,
-        "upgrade": 2.5,
-        "upgraded": 2.5,
-        "strong": 1.5,
-        "weak": -1.5,
-        "plunge": -2.5,
-        "plunges": -2.5,
-        "slump": -2.0,
-        "slumps": -2.0,
-        "soar": 3.0,
-        "soars": 3.0,
-        "surge": 2.5,
-        "surges": 2.5,
-        "profit": 2.0,
-        "loss": -2.0,
-        "liquidity": 1.5,
-        "default": -3.0,
-        "bankrupt": -3.5,
-        "bankruptcy": -3.5,
+# --- CACHING & RESOURCES ---
+@st.cache_resource
+def load_sentiment_resources():
+    try:
+        nltk.data.find('sentiment/vader_lexicon.zip')
+    except LookupError:
+        nltk.download('vader_lexicon', quiet=True)
+    
+    sia = SentimentIntensityAnalyzer()
+    
+    # Financial Dictionary
+    financial_lexicon = {
+        'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
+        'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
+        'dividend': 2.0, 'earnings': 1.5, 'profit': 2.0, 'growth': 2.0,
+        'resilient': 2.0, 'strong': 2.0, 'up': 1.0, 'down': -1.0,
+        'acquisition': 1.5, 'buyback': 1.5, 'challenging': -1.0, 'headwinds': -1.5
     }
-    analyzer.lexicon.update(finance_lexicon)
-    return analyzer
+    sia.lexicon.update(financial_lexicon)
+    return sia
 
-
-@st.cache_data(show_spinner=False)
-def get_market_data(ticker: str, period: str = "1y") -> Tuple[pd.DataFrame, Dict]:
-    """Fetch historical data and basic info for a ticker."""
-    ticker_obj = yf.Ticker(ticker)
-    hist = ticker_obj.history(period=period)
-    info = ticker_obj.info or {}
-    return hist, info
-
-
-@st.cache_data(show_spinner=False)
-def get_competitor_financials(tickers: Dict[str, str]) -> pd.DataFrame:
-    """
-    Build a DataFrame with basic valuation metrics for a dict of {name: ticker}.
-    """
-    metrics: List[Dict] = []
-    for name, symbol in tickers.items():
-        try:
-            stock = yf.Ticker(symbol)
-            info = stock.info or {}
-            pe = info.get("trailingPE")
-            pb = info.get("priceToBook")
-            roe = info.get("returnOnEquity")
-            mkt_cap = info.get("marketCap")
-
-            metrics.append(
-                {
-                    "Company": name,
-                    "Ticker": symbol,
-                    "P/E Ratio": pe,
-                    "P/B Ratio": pb,
-                    "ROE (proxy for ROIC)": roe,
-                    "Market Cap": mkt_cap,
-                }
-            )
-        except Exception:
-            continue
-
-    if not metrics:
-        return pd.DataFrame()
-    return pd.DataFrame(metrics)
-
-
-# --------------------------------------------------
-# UTILITIES
-# --------------------------------------------------
-def compute_price_change(hist: pd.DataFrame) -> Tuple[float, float]:
-    """
-    Compute absolute and percentage price change using last two closes.
-    Returns (abs_change, pct_change). If insufficient data, returns (0.0, 0.0).
-    """
-    if hist is None or hist.empty or len(hist["Close"]) < 2:
-        return 0.0, 0.0
-    last = float(hist["Close"].iloc[-1])
-    prev = float(hist["Close"].iloc[-2])
-    abs_change = last - prev
-    pct_change = (abs_change / prev) * 100 if prev != 0 else 0.0
-    return abs_change, pct_change
-
-
-def get_final_url(url: str, timeout: int = 8) -> str:
-    """Follow redirects to get final URL."""
-    try:
-        resp = requests.get(url, timeout=timeout)
-        resp.raise_for_status()
-        return resp.url
-    except Exception:
-        return url
-
-
-def get_article_content(url: str, timeout: int = 8) -> str:
-    """Extract main article text using trafilatura."""
-    try:
-        final_url = get_final_url(url, timeout=timeout)
-        downloaded = trafilatura.fetch_url(final_url)
-        if not downloaded:
-            return ""
-        extracted = trafilatura.extract(
-            downloaded,
-            include_comments=False,
-            include_tables=False,
-        )
-        return extracted or ""
-    except Exception:
-        return ""
-
-
-def analyze_content(text: str) -> Tuple[float, Dict[str, float]]:
-    """
-    Analyze sentiment of a text.
-    Returns overall compound score and a dict of key financial driver terms.
-    """
-    if not text:
-        return 0.0, {}
-
-    analyzer = get_vader_analyzer()
-    scores = analyzer.polarity_scores(text)
-    compound = scores["compound"]
-
-    drivers: Dict[str, float] = {}
-    lowered = text.lower()
-    for word, val in analyzer.lexicon.items():
-        if word in lowered and abs(val) >= 1.0:
-            drivers[word] = val
-
-    return compound, drivers
-
-
-@st.cache_data(show_spinner=False)
-def fetch_news_score(
-    query: str,
-    article_limit: int = 7,
-) -> Tuple[float, List[Dict]]:
-    """
-    Fetch news for a query using Google News RSS, analyze sentiment,
-    and return (weighted_score, articles_with_metadata).
-
-    Each article dict contains:
-    - title
-    - link
-    - published
-    - sentiment
-    """
-    base_url = "https://news.google.com/rss/search"
-    params = {"q": query, "hl": "en-ZA", "gl": "ZA", "ceid": "ZA:en"}
-    try:
-        resp = requests.get(base_url, params=params, timeout=8)
-        resp.raise_for_status()
-        feed = feedparser.parse(resp.text)
-    except Exception as e:
-        # Surface the failure once in the UI but don't break the app
-        st.warning(f"Could not load news for '{query}': {e}")
-        return 0.0, []
-
-    articles: List[Dict] = []
-    total_weight = 0.0
-    weighted_sum = 0.0
-    now = datetime.now(timezone.utc)
-
-    for entry in feed.entries[:article_limit]:
-        link = entry.get("link")
-        if not link:
-            continue
-
-        # Try full article content first
-        content = get_article_content(link)
-
-        # Fallback to title + summary if full text isn't available
-        if not content:
-            content = " ".join(
-                [
-                    entry.get("title", ""),
-                    entry.get("summary", ""),
-                ]
-            ).strip()
-
-        if not content:
-            continue
-
-        score, _ = analyze_content(content)
-
-        published = entry.get("published")
-        if published:
-            try:
-                pub_dt = parsedate_to_datetime(published)
-            except Exception:
-                pub_dt = now
-        else:
-            pub_dt = now
-
-        days_old = max((now - pub_dt).days, 0)
-        weight = 1.0 / (1.0 + 0.1 * days_old)  # exponential-style decay
-
-        weighted_sum += score * weight
-        total_weight += weight
-
-        articles.append(
-            {
-                "title": entry.get("title", "No title"),
-                "link": link,
-                "published": pub_dt,
-                "sentiment": score,
-            }
-        )
-
-    if not articles or total_weight == 0:
-        return 0.0, []
-
-    overall = weighted_sum / total_weight
-    return overall, articles
-
-
-def format_pct(p: float) -> str:
-    return f"{p:+.2f}%"
-
-
-def sentiment_label(score: float) -> str:
-    if score >= 0.25:
-        return "Positive"
-    if score <= -0.25:
-        return "Negative"
-    return "Neutral"
-
-
-# --------------------------------------------------
-# SIDEBAR CONTROLS
-# --------------------------------------------------
-with st.sidebar:
-    st.header("Dashboard Settings")
-
-    main_ticker = st.text_input(
-        "Primary ticker",
-        value="IVT.JO",
-        help="Yahoo Finance ticker symbol",
-    )
-
-    period = st.selectbox(
-        "Price history period",
-        ["3mo", "6mo", "1y", "5y"],
-        index=2,
-    )
-
-    st.markdown("---")
-
-    default_peers = {
-        "Invicta (IVT)": "IVT.JO",
-        "Hudaco (HDC)": "HDC.JO",
-        "Barloworld (BAW)": "BAW.JO",
-    }
-    peer_symbols = list(default_peers.values())
-    peer_labels = list(default_peers.keys())
-
-    selected_peers = st.multiselect(
-        "Peers for comparison",
-        options=peer_symbols,
-        default=peer_symbols,
-        format_func=lambda x: peer_labels[peer_symbols.index(x)],
-        help="Tickers to include in competitor analysis",
-    )
-
-    news_article_limit = st.slider(
-        "News articles per company",
-        3,
-        15,
-        7,
-        1,
-    )
-
-    sentiment_mode = st.radio(
-        "Sentiment comparison universe",
-        ["Invicta only", "All selected peers"],
-        index=1,
-    )
-
-# --------------------------------------------------
-# TITLE & INTRO
-# --------------------------------------------------
-st.title("🏭 Invicta Holdings Live Dashboard")
-
-glass_card_start()
-st.caption(
-    "A live, glassmorphism-style dashboard for Invicta Holdings and peers. "
-    "Market data from Yahoo Finance; news sentiment based on recent Google News coverage."
-)
-glass_card_end()
-
-# --------------------------------------------------
-# MAIN TICKER DATA
-# --------------------------------------------------
-main_hist, main_info = get_market_data(main_ticker, period=period)
-
-if main_hist.empty:
-    glass_card_start()
-    st.error(
-        "Could not load market data for the selected ticker. "
-        "Please confirm the symbol (e.g. IVT.JO) and try again."
-    )
-    glass_card_end()
+try:
+    sia = load_sentiment_resources()
+except Exception as e:
+    st.error(f"Error loading AI: {e}")
     st.stop()
 
-last_price = float(main_hist["Close"].iloc[-1])
-abs_chg, pct_chg = compute_price_change(main_hist)
+# --- HELPER FUNCTIONS ---
+def get_final_url(url):
+    try:
+        session = requests.Session()
+        session.headers.update({"User-Agent": "Mozilla/5.0"})
+        response = session.head(url, allow_redirects=True, timeout=5)
+        return response.url
+    except:
+        return url
 
-glass_card_start()
-col_kpi1, col_kpi2, col_kpi3 = st.columns(3)
-with col_kpi1:
-    st.metric("Last Price", f"{last_price:.2f}", format_pct(pct_chg))
-with col_kpi2:
-    mkt_cap = main_info.get("marketCap")
-    st.metric("Market Cap", f"{mkt_cap:,.0f}" if mkt_cap else "N/A")
-with col_kpi3:
-    sector = main_info.get("sector", "N/A")
-    st.metric("Sector", sector)
-glass_card_end()
+def get_article_content(url):
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(downloaded)
+            if text and len(text) > 200: return text
+    except:
+        pass
+    return None
 
-# --------------------------------------------------
-# SECTION 1: MARKET PERFORMANCE
-# --------------------------------------------------
-glass_card_start()
-st.subheader("Market Performance")
+def analyze_content(text, method="Snippet"):
+    score = sia.polarity_scores(text)['compound']
+    
+    if score >= 0.05: label, icon = "Positive", "🟢"
+    elif score <= -0.05: label, icon = "Negative", "🔴"
+    else: label, icon = "Neutral", "⚪"
+    
+    words = text.lower().split()
+    drivers = []
+    for word in words:
+        clean_word = word.strip('.,!?"\'()')
+        if clean_word in sia.lexicon:
+            val = sia.lexicon[clean_word]
+            if abs(val) >= 1.0: drivers.append((clean_word, val))
+    
+    drivers.sort(key=lambda x: abs(x[1]), reverse=True)
+    unique_drivers = list(set([x[0] for x in drivers]))[:5]
+    
+    explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers]) if unique_drivers else f"Based on {method}."
+    return score, label, icon, explanation
 
-fig = go.Figure()
-fig.add_trace(
-    go.Scatter(
-        x=main_hist.index,
-        y=main_hist["Close"],
-        mode="lines",
-        name=main_ticker,
-    )
-)
-fig.update_layout(
-    xaxis_title="Date",
-    yaxis_title="Price",
-    hovermode="x unified",
-    height=400,
-    margin=dict(l=10, r=10, t=40, b=10),
-)
-st.plotly_chart(fig, use_container_width=True)
-glass_card_end()
+# --- FINANCIAL DATA FUNCTIONS ---
+@st.cache_data(ttl=900)
+def get_market_data(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        return stock.history(period="1y"), stock.info
+    except:
+        return pd.DataFrame(), {}
 
-# --------------------------------------------------
-# SECTION 2: COMPETITOR VALUATION SNAPSHOT
-# --------------------------------------------------
-glass_card_start()
-st.subheader("Financial Comparison vs. Competitors")
-
-selected_peers_dict = {k: v for k, v in default_peers.items() if v in selected_peers}
-
-if not selected_peers_dict:
-    st.info("Select at least one peer in the sidebar to see competitor comparisons.")
-else:
-    comp_df = get_competitor_financials(selected_peers_dict)
-    if comp_df.empty:
-        st.warning("Could not load competitor fundamentals.")
-    else:
-        st.dataframe(comp_df.set_index("Company"))
-
-        scatter_df = comp_df.dropna(subset=["P/E Ratio", "P/B Ratio"])
-        if not scatter_df.empty:
-            scat_fig = go.Figure()
-            scat_fig.add_trace(
-                go.Scatter(
-                    x=scatter_df["P/B Ratio"],
-                    y=scatter_df["P/E Ratio"],
-                    mode="markers+text",
-                    text=scatter_df["Company"],
-                    textposition="top center",
-                )
-            )
-            scat_fig.update_layout(
-                xaxis_title="P/B Ratio",
-                yaxis_title="P/E Ratio",
-                title="Valuation Positioning",
-                height=450,
-                margin=dict(l=10, r=10, t=40, b=10),
-            )
-            st.plotly_chart(scat_fig, use_container_width=True)
-glass_card_end()
-
-# --------------------------------------------------
-# SECTION 3: NEWS & SENTIMENT – INVICTA
-# --------------------------------------------------
-glass_card_start()
-st.subheader("News & Sentiment – Invicta")
-
-ivt_query = "Invicta Holdings South Africa"
-ivt_score, ivt_articles = fetch_news_score(ivt_query, article_limit=news_article_limit)
-
-col_sent1, col_sent2 = st.columns([1, 2])
-with col_sent1:
-    st.metric(
-        "Media Sentiment (Invicta)",
-        f"{ivt_score:+.3f}",
-        sentiment_label(ivt_score),
-    )
-with col_sent2:
-    if ivt_articles:
-        pos = sum(1 for a in ivt_articles if a["sentiment"] >= 0.25)
-        neg = sum(1 for a in ivt_articles if a["sentiment"] <= -0.25)
-        neu = len(ivt_articles) - pos - neg
-        st.write(
-            f"Based on {len(ivt_articles)} recent articles: "
-            f"{pos} positive, {neu} neutral, {neg} negative."
-        )
-    else:
-        st.write(
-            "No sufficiently long, parsable or public recent articles found for Invicta. "
-            "This can happen with paywalled or very short coverage."
-        )
-
-if ivt_articles:
-    with st.expander("View analysed Invicta articles"):
-        for art in ivt_articles:
-            st.markdown(f"**[{art['title']}]({art['link']})**")
-            st.write(
-                f"Published: {art['published'].strftime('%Y-%m-%d')} · "
-                f"Sentiment: {art['sentiment']:+.3f} ({sentiment_label(art['sentiment'])})"
-            )
-            st.markdown("---")
-glass_card_end()
-
-# --------------------------------------------------
-# SECTION 4: SENTIMENT BATTLE – PEERS VS INVICTA
-# --------------------------------------------------
-glass_card_start()
-st.subheader("Sentiment Battle – Invicta vs Peers")
-
-sentiment_universe: Dict[str, Tuple[float, List[Dict]]] = {}
-sentiment_universe["Invicta Holdings"] = (ivt_score, ivt_articles)
-
-if sentiment_mode == "All selected peers":
-    for name, symbol in selected_peers_dict.items():
-        if "Invicta" in name:
-            continue
-        peer_query = name.split("(")[0].strip() + " South Africa"
-        score, arts = fetch_news_score(peer_query, article_limit=news_article_limit)
-        sentiment_universe[name] = (score, arts)
-
-if not sentiment_universe:
-    st.info("No companies available to compare sentiment.")
-else:
-    comp_names = list(sentiment_universe.keys())
-    scores = [sentiment_universe[n][0] for n in comp_names]
-
-    bar_fig = go.Figure()
-    bar_fig.add_trace(
-        go.Bar(
-            x=comp_names,
-            y=scores,
-            text=[f"{s:+.2f}" for s in scores],
-            textposition="auto",
-        )
-    )
-    bar_fig.update_layout(
-        yaxis_title="Sentiment score (VADER compound, -1 to 1)",
-        yaxis=dict(range=[-1, 1]),
-        height=450,
-        margin=dict(l=10, r=10, t=40, b=10),
-    )
-    st.plotly_chart(bar_fig, use_container_width=True)
-
-    with st.expander("Articles by company"):
-        for name in comp_names:
-            score, arts = sentiment_universe[name]
-            st.markdown(f"### {name} ({sentiment_label(score)}) – {score:+.3f}")
-            if not arts:
-                st.write("No sufficiently long or parsable recent articles.")
+@st.cache_data(ttl=3600) # Cache financial comparison for 1 hour
+def get_competitor_financials():
+    """
+    Fetches and normalizes financial data for Invicta, Hudaco, and Barloworld.
+    """
+    tickers = {
+        "Invicta (IVT)": "IVT.JO",
+        "Hudaco (HDC)": "HDC.JO",
+        "Barloworld (BAW)": "BAW.JO"
+    }
+    
+    metrics = []
+    history_df = pd.DataFrame()
+    
+    for name, sym in tickers.items():
+        try:
+            stock = yf.Ticker(sym)
+            
+            # 1. Get History & Normalize
+            hist = stock.history(period="1y")
+            if not hist.empty:
+                start_price = hist['Close'].iloc[0]
+                # Calculate % Growth from start date
+                hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
+                history_df[name] = hist['Growth']
+                current_price = hist['Close'].iloc[-1]
             else:
-                for art in arts:
-                    st.markdown(
-                        f"- [{art['title']}]({art['link']}) · "
-                        f"{art['published'].strftime('%Y-%m-%d')} · "
-                        f"{art['sentiment']:+.3f} ({sentiment_label(art['sentiment'])})"
-                    )
-            st.markdown("---")
-glass_card_end()
+                current_price = 0
 
-# --------------------------------------------------
-# FOOTER
-# --------------------------------------------------
-glass_card_start()
-st.caption(
-    "This dashboard is for informational purposes only and does not constitute investment advice."
-)
-glass_card_end()
+            # 2. Get Fundamentals
+            info = stock.info
+            metrics.append({
+                "Company": name,
+                "Price": current_price,
+                "P/E Ratio": info.get('trailingPE', 0),
+                "Div Yield (%)": (info.get('dividendYield', 0) or 0) * 100,
+                "Market Cap (B)": (info.get('marketCap', 0) or 0) / 1e9,
+                "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
+            })
+        except:
+            continue
+            
+    return pd.DataFrame(metrics), history_df
+
+# --- NEWS FUNCTIONS ---
+@st.cache_data(ttl=3600)
+def fetch_news_score(query, article_limit=5):
+    encoded = query.replace(" ", "%20")
+    rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
+    feed = feedparser.parse(rss_url)
+    
+    if not feed.entries: return 0.0, []
+    
+    news_items = []
+    limit = min(len(feed.entries), article_limit)
+    
+    for entry in feed.entries[:limit]:
+        real_url = get_final_url(entry.link)
+        full_text = get_article_content(real_url)
+        
+        if full_text:
+            score, label, icon, expl = analyze_content(full_text, "Full Text")
+            snippet = full_text[:300] + "..."
+            method = "✅ Full Text"
+        else:
+            raw_desc = entry.get('description', entry.title)
+            import re
+            clean_desc = re.sub('<.*?>', '', raw_desc)
+            score, label, icon, expl = analyze_content(clean_desc, "Snippet")
+            snippet = clean_desc
+            method = "⚠️ Snippet"
+            
+        try:
+            dt = parsedate_to_datetime(entry.published)
+            clean_date = dt.strftime("%d %b %Y")
+        except:
+            clean_date = "Recent"
+
+        news_items.append({
+            "title": entry.title,
+            "link": real_url,
+            "source": entry.source.title if hasattr(entry, 'source') else "News",
+            "date": clean_date,
+            "snippet": snippet,
+            "Sentiment": label,
+            "Icon": icon,
+            "Score": score,
+            "Explanation": expl,
+            "Method": method
+        })
+        
+    avg_score = pd.DataFrame(news_items)['Score'].mean() if news_items else 0.0
+    return avg_score, news_items
+
+# --- MAIN APP ---
+def main():
+    st.title("🏭 Invicta Holdings (IVT) | 360° Dashboard")
+    
+    # 1. MARKET DATA (TOP ROW)
+    history, info = get_market_data("IVT.JO")
+    
+    if not history.empty:
+        curr = history['Close'].iloc[-1]
+        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Price", f"R {curr:.2f}", f"{pct:.2f}%")
+        c2.metric("PE Ratio", f"{info.get('trailingPE', 'N/A')}")
+        c3.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        
+        # Charts
+        st.subheader("Price Performance & Volume")
+        history['Vol_Avg'] = history['Volume'].rolling(window=30).mean()
+        fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+        fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
+        colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
+        fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Shares Traded"), row=2, col=1)
+        fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="30-Day Avg Volume", line=dict(color='orange', width=2)), row=2, col=1)
+        fig.update_layout(height=500, margin=dict(l=20, r=20, t=20, b=20), xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0), hovermode='x unified')
+        fig.update_yaxes(title_text="<b>Price (ZAR)</b>", tickprefix="R", row=1, col=1)
+        fig.update_yaxes(title_text="<b>Shares Traded</b>", row=2, col=1)
+        st.plotly_chart(fig, use_container_width=True)
+    
+    # 2. COMPETITOR FINANCIAL BENCHMARKING (NEW SECTION)
+    st.divider()
+    st.subheader("📊 Financial Comparison vs. Competitors")
+    st.caption("Comparing Invicta (IVT) against Hudaco (HDC) and Barloworld (BAW).")
+    
+    with st.spinner("Crunching financial data..."):
+        comp_metrics, comp_history = get_competitor_financials()
+        
+    if not comp_metrics.empty:
+        col_chart, col_table = st.columns([3, 2])
+        
+        with col_chart:
+            st.markdown("**1-Year Relative Performance (%)**")
+            fig_rel = go.Figure()
+            colors = {"Invicta (IVT)": "#1f77b4", "Hudaco (HDC)": "#d62728", "Barloworld (BAW)": "#2ca02c"}
+            
+            for col in comp_history.columns:
+                width = 4 if "Invicta" in col else 2
+                fig_rel.add_trace(go.Scatter(
+                    x=comp_history.index, 
+                    y=comp_history[col], 
+                    mode='lines', 
+                    name=col,
+                    line=dict(width=width, color=colors.get(col, "gray"))
+                ))
+            fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=0, b=0), hovermode='x unified', yaxis_title="Growth %")
+            st.plotly_chart(fig_rel, use_container_width=True)
+            
+        with col_table:
+            st.markdown("**Valuation Matrix**")
+            # Formatting the table nicely
+            styled_df = comp_metrics.copy()
+            styled_df['Price'] = styled_df['Price'].apply(lambda x: f"R {x:.2f}")
+            styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
+            styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
+            styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
+            styled_df['1Y Return (%)'] = styled_df['1Y Return (%)'].apply(lambda x: f"{x:+.2f}%")
+            
+            st.dataframe(styled_df, hide_index=True, use_container_width=True)
+            
+            # Auto-Verdict
+            ivt_pe = comp_metrics.loc[comp_metrics['Company'].str.contains("Invicta"), 'P/E Ratio'].values[0]
+            avg_pe = comp_metrics['P/E Ratio'].mean()
+            
+            if ivt_pe < avg_pe:
+                st.success(f"**Undervalued:** Invicta's P/E ({ivt_pe:.2f}) is lower than the peer average ({avg_pe:.2f}).")
+            else:
+                st.warning(f"**Premium Valuation:** Invicta is trading at a higher P/E ({ivt_pe:.2f}) than the peer average.")
+
+    # 3. NEWS & SENTIMENT
+    st.divider()
+    st.subheader("📰 Sentiment Analysis & Impact")
+    
+    with st.spinner("Analyzing News..."):
+        ivt_score, ivt_news = fetch_news_score("Invicta Holdings Limited", article_limit=6)
+        hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
+        baw_score, _ = fetch_news_score("Barloworld Limited", article_limit=3)
+
+    if ivt_news:
+        st.metric("Invicta Media Score", f"{ivt_score:.2f}", delta="Bullish" if ivt_score > 0 else "Bearish")
+        
+        for item in ivt_news:
+            with st.expander(f"{item['Icon']} {item['title']}"):
+                col_txt, col_imp = st.columns([3, 1])
+                with col_txt:
+                    st.caption(f"**Source:** {item['source']} | {item['date']}")
+                    st.info(f"💡 {item['Explanation']}")
+                    st.markdown(f"**Preview:** {item['snippet']}")
+                    st.markdown(f"[Read Article]({item['link']})")
+                with col_imp:
+                    st.markdown("##### Impact")
+                    norm_score = (item['Score'] + 1) / 2 
+                    st.progress(norm_score)
+                    if item['Score'] > 0.05: st.success(f"+{item['Score']:.2f}")
+                    elif item['Score'] < -0.05: st.error(f"{item['Score']:.2f}")
+                    else: st.warning("Neutral")
+
+    # 4. SENTIMENT BATTLE
+    st.divider()
+    st.subheader("🏆 Sentiment Battle")
+    
+    comp_data = {
+        'Company': ['Invicta (IVT)', 'Hudaco (HDC)', 'Barloworld (BAW)'],
+        'Sentiment Score': [ivt_score, hdc_score, baw_score]
+    }
+    df_comp = pd.DataFrame(comp_data)
+    
+    fig_comp = go.Figure(go.Bar(
+        x=df_comp['Sentiment Score'], y=df_comp['Company'], orientation='h',
+        marker_color=['#1f77b4', '#d62728', '#2ca02c'],
+        text=df_comp['Sentiment Score'].apply(lambda x: f"{x:.2f}"), textposition='auto'
+    ))
+    fig_comp.update_layout(height=250, margin=dict(l=0, r=0, t=10, b=0), xaxis_title="Sentiment Score")
+    st.plotly_chart(fig_comp, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
