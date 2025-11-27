@@ -332,13 +332,29 @@ def main():
             with c_main:
                 st.subheader("Price & Volume Analysis")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+                
+                # Price Trace
                 fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=history.index, y=history['SMA_200'], line=dict(color='firebrick', width=1.5), name="200-Day SMA"), row=1, col=1)
+                
+                # Volume Trace with Enhanced Labelling
                 colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
-                fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
+                fig.add_trace(go.Bar(
+                    x=history.index, 
+                    y=history['Volume'], 
+                    marker_color=colors, 
+                    name="Volume",
+                    hovertemplate='<b>Date</b>: %{x|%d %b %Y}<br><b>Volume</b>: %{y:,} shares<extra></extra>'
+                ), row=2, col=1)
+                
                 fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
+                
+                # Layout Updates
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
+                fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
+                fig.update_yaxes(title_text="Volume (Shares)", tickformat=".2s", row=2, col=1) # Smart formatting (2M, 500k)
+                
                 st.plotly_chart(fig, use_container_width=True)
                 
                 # FIXED LEGEND
