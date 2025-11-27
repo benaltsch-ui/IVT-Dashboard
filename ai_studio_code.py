@@ -352,38 +352,54 @@ def main():
             with c_sidebar:
                 st.subheader("💡 AI Technical Verdict")
                 
+                # Trend Logic with Explanation
                 if curr > sma_50_val and curr > sma_200_val:
-                    trend_msg = "Bullish (Above SMA 50 & 200)"
+                    trend_msg = "Bullish"
                     trend_icon = "🟢"
+                    trend_expl = f"Price (R {curr:.2f}) is trading above both the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
                 elif curr < sma_50_val and curr < sma_200_val:
-                    trend_msg = "Bearish (Below SMA 50 & 200)"
+                    trend_msg = "Bearish"
                     trend_icon = "🔴"
+                    trend_expl = f"Price (R {curr:.2f}) is trading below both the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
                 else:
-                    trend_msg = "Neutral / Consolidation"
+                    trend_msg = "Neutral"
                     trend_icon = "⚪"
+                    trend_expl = f"Price is currently consolidating between the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
                 
+                # Momentum Logic with Explanation
                 if current_rsi > 70:
-                    mom_msg = "Overbought (Risk of Pullback)"
+                    mom_msg = "Overbought"
                     mom_icon = "⚠️"
+                    mom_expl = f"RSI is {current_rsi:.1f} (>70), suggesting the stock may be due for a pullback."
                 elif current_rsi < 30:
-                    mom_msg = "Oversold (Bounce Possible)"
+                    mom_msg = "Oversold"
                     mom_icon = "♻️"
+                    mom_expl = f"RSI is {current_rsi:.1f} (<30), suggesting the stock may be undervalued/due for a bounce."
                 else:
-                    mom_msg = "Stable Momentum"
+                    mom_msg = "Stable"
                     mom_icon = "✅"
+                    mom_expl = f"RSI is {current_rsi:.1f}, sitting comfortably in the neutral zone (30-70)."
                     
+                # MACD Logic with Explanation
                 if macd_val > signal_val:
                     macd_msg = "Positive Divergence"
+                    macd_icon = "🟢"
+                    macd_expl = f"The MACD line ({macd_val:.2f}) is above the Signal line ({signal_val:.2f}), indicating bullish momentum."
                 else:
                     macd_msg = "Negative Divergence"
+                    macd_icon = "🔴"
+                    macd_expl = f"The MACD line ({macd_val:.2f}) is below the Signal line ({signal_val:.2f}), indicating bearish momentum."
 
+                # Display Verdicts
                 st.markdown(f"**Trend:** {trend_icon} {trend_msg}")
-                st.markdown(f"**Momentum:** {mom_icon} {mom_msg}")
-                st.markdown(f"**MACD:** {macd_msg}")
+                st.caption(trend_expl)
                 
-                st.markdown("---")
-                st.metric("RSI (14-Day)", f"{current_rsi:.1f}")
-                st.metric("MACD Level", f"{macd_val:.2f}")
+                st.markdown(f"**Momentum:** {mom_icon} {mom_msg}")
+                st.caption(mom_expl)
+                
+                st.markdown(f"**MACD:** {macd_icon} {macd_msg}")
+                st.caption(macd_expl)
+                
                 st.markdown("---")
                 
                 high_52 = history_full['High'].tail(252).max()
