@@ -86,7 +86,10 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
-        return stock.history(period=period), stock.info
+        # Fetch longer history for 200 SMA calculation if needed, then slice back
+        history = stock.history(period="2y") 
+        info = stock.info
+        return history, info
     except:
         return pd.DataFrame(), {}
 
@@ -176,25 +179,46 @@ def main():
     # --- SIDEBAR CONTROLS ---
     st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/JSE_Logo.png/640px-JSE_Logo.png", width=100)
     st.sidebar.title("Controls")
-    timeframe = st.sidebar.selectbox("Chart Timeframe", ["1mo", "3mo", "6mo", "1y", "2y", "5y"], index=3)
+    # We fetch 2y data by default to calculate 200SMA, but we display based on this selection
+    display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
     
     st.title("🏭 Invicta Holdings (IVT)")
     st.caption("Strategic Intelligence Dashboard")
 
     # 1. FETCH MAIN DATA
-    history, info = get_market_data("IVT.JO", period=timeframe)
+    # Fetch 2y history to ensure we have enough data points for the 200 SMA
+    history_full, info = get_market_data("IVT.JO", period="2y")
     
-    if not history.empty:
-        # Calculate Technicals (RSI)
-        delta = history['Close'].diff()
+    if not history_full.empty:
+        # --- CALCULATE TECHNICAL INDICATORS ---
+        # 1. Moving Averages
+        history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
+        history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
+        
+        # 2. RSI (14-Day)
+        delta = history_full['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
-        history['RSI'] = 100 - (100 / (1 + rs))
-        current_rsi = history['RSI'].iloc[-1]
+        history_full['RSI'] = 100 - (100 / (1 + rs))
         
+        # 3. Volume Average
+        history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
+
+        # --- SLICE DATA FOR DISPLAY ---
+        # Filter the dataframe based on the user selection in sidebar
+        if display_period == "3mo": slice_days = 90
+        elif display_period == "6mo": slice_days = 180
+        elif display_period == "1y": slice_days = 365
+        else: slice_days = 730
+        
+        history = history_full.tail(slice_days).copy()
+        
+        # Metrics
         curr = history['Close'].iloc[-1]
-        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        prev = history['Close'].iloc[-2]
+        pct = ((curr - prev) / prev) * 100
+        current_rsi = history['RSI'].iloc[-1]
         
         # --- TOP LEVEL METRICS ---
         m1, m2, m3, m4 = st.columns(4)
@@ -204,40 +228,95 @@ def main():
         m4.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
         # --- TABS ---
-        tab_market, tab_comp, tab_sent, tab_own = st.tabs([
+        tab_market, tab_comp, tab_sent = st.tabs([
             "📈 Market & Technicals", 
             "📊 Competitor Benchmarks", 
-            "📰 AI Sentiment", 
-            "🏢 Ownership"
+            "📰 AI Sentiment"
         ])
 
-        # --- TAB 1: MARKET & TECHNICALS ---
+        # --- TAB 1: MARKET & TECHNICALS (ENHANCED) ---
         with tab_market:
-            c_main, c_curr = st.columns([2, 1])
+            c_main, c_sidebar = st.columns([3, 1])
+            
             with c_main:
-                st.subheader("Price & Volume Analysis")
-                history['Vol_Avg'] = history['Volume'].rolling(window=30).mean()
+                st.subheader("Technical Price Analysis")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+                
+                # Candlestick
                 fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
+                
+                # Moving Averages
+                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_200'], line=dict(color='firebrick', width=1.5), name="200-Day SMA"), row=1, col=1)
+                
+                # Volume
                 colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
                 fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
-                fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange')), row=2, col=1)
-                fig.update_layout(height=500, xaxis_rangeslider_visible=False, showlegend=False)
+                fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
+                
+                fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
+                fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
+                fig.update_yaxes(title_text="Volume", row=2, col=1)
                 st.plotly_chart(fig, use_container_width=True)
-            
-            with c_curr:
-                st.subheader("Currency Risk (USD/ZAR)")
-                st.caption("Weak Rand (Graph Up) = Higher Import Costs.")
+                
+                st.info("💡 **Legend:** 🔵 **Blue Line** = 50-Day Avg (Short Term Trend) | 🔴 **Red Line** = 200-Day Avg (Long Term Trend). If Blue crosses above Red, it's a 'Golden Cross' (Bullish).")
+
+            with c_sidebar:
+                # TRADING STATISTICS SECTION
+                st.subheader("Trading Data")
+                
+                # 52 Week High/Low
+                high_52 = history_full['High'].tail(252).max()
+                low_52 = history_full['Low'].tail(252).min()
+                st.metric("52-Week High", f"R {high_52:.2f}")
+                st.metric("52-Week Low", f"R {low_52:.2f}")
+                
+                st.markdown("---")
+                
+                # Volatility
+                volatility = history['Close'].pct_change().std() * (252**0.5) * 100
+                st.metric("Annualized Volatility", f"{volatility:.1f}%")
+                
+                # Trend Status
+                st.markdown("---")
+                st.markdown("**Trend Status**")
+                sma_50_val = history['SMA_50'].iloc[-1]
+                sma_200_val = history['SMA_200'].iloc[-1]
+                
+                if curr > sma_200_val:
+                    st.success("Long-Term: Bullish (Above 200 SMA)")
+                else:
+                    st.error("Long-Term: Bearish (Below 200 SMA)")
+                    
+                if curr > sma_50_val:
+                    st.success("Short-Term: Bullish (Above 50 SMA)")
+                else:
+                    st.warning("Short-Term: Bearish (Below 50 SMA)")
+
+            # CURRENCY SECTION (Bottom Row of Tab 1)
+            st.divider()
+            c_forex, c_info = st.columns([2, 1])
+            with c_forex:
+                st.subheader("🇿🇦 Currency Correlation (USD/ZAR)")
                 with st.spinner("Loading Forex..."):
-                    forex = yf.Ticker("ZAR=X").history(period=timeframe)
+                    forex = yf.Ticker("ZAR=X").history(period=display_period)
                 if not forex.empty:
+                    # Normalize
                     h_norm = (history['Close'] / history['Close'].iloc[0]) * 100
                     f_norm = (forex['Close'] / forex['Close'].iloc[0]) * 100
                     fig_c = go.Figure()
-                    fig_c.add_trace(go.Scatter(x=history.index, y=h_norm, name='Invicta'))
-                    fig_c.add_trace(go.Scatter(x=forex.index, y=f_norm, name='USD/ZAR', line=dict(dash='dot')))
-                    fig_c.update_layout(height=400, showlegend=True, legend=dict(orientation="h", y=1.1))
+                    fig_c.add_trace(go.Scatter(x=history.index, y=h_norm, name='Invicta (Share Price)', line=dict(width=2)))
+                    fig_c.add_trace(go.Scatter(x=forex.index, y=f_norm, name='USD/ZAR (Exchange Rate)', line=dict(dash='dot', color='orange')))
+                    fig_c.update_layout(height=350, yaxis_title="Relative Performance (%)", hovermode="x unified")
                     st.plotly_chart(fig_c, use_container_width=True)
+            with c_info:
+                st.info("""
+                **Why this matters?**
+                Invicta imports engineering components (Bearings, Belts, Hydraulics).
+                
+                *   **Orange Line Up (Weak Rand):** Import costs rise, potentially squeezing margins.
+                *   **Orange Line Down (Strong Rand):** Imports become cheaper, boosting margins.
+                """)
 
         # --- TAB 2: COMPETITORS ---
         with tab_comp:
@@ -254,16 +333,17 @@ def main():
                     for col in comp_history.columns:
                         width = 4 if "Invicta" in col else 2
                         fig_rel.add_trace(go.Scatter(x=comp_history.index, y=comp_history[col], mode='lines', name=col, line=dict(width=width, color=colors.get(col, "gray"))))
-                    fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0))
+                    fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0), yaxis_title="Growth %")
                     st.plotly_chart(fig_rel, use_container_width=True)
                 with col_c2:
                     st.markdown("**Valuation Table**")
+                    # Clean formatting
                     styled_df = comp_metrics.copy()
                     styled_df['Price'] = styled_df['Price'].apply(lambda x: f"R {x:.2f}")
                     styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
                     styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
                     styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
-                    styled_df.drop(columns=['1Y Return (%)'], inplace=True) 
+                    styled_df.drop(columns=['1Y Return (%)'], inplace=True) # Already in chart
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
         # --- TAB 3: SENTIMENT ---
@@ -295,38 +375,6 @@ def main():
                             with c_i:
                                 st.progress((item['Score'] + 1) / 2)
                                 st.caption(f"Impact: {item['Score']:.2f}")
-
-        # --- TAB 4: OWNERSHIP (FIXED) ---
-        with tab_own:
-            st.subheader("Shareholder Structure")
-            
-            # 1. Attempt Live Fetch
-            try:
-                holders = yf.Ticker("IVT.JO").major_holders
-                
-                # Check if data is valid
-                if holders is not None and not holders.empty:
-                    holders.columns = ['Percentage', 'Category']
-                    st.dataframe(holders, hide_index=True, use_container_width=True)
-                else:
-                    raise ValueError("No data returned")
-                    
-            except:
-                # 2. Fallback to Latest Known Data (If API fails)
-                st.warning("⚠️ Live API ownership data unavailable for IVT.JO. Displaying latest Annual Report data:")
-                
-                fallback_data = {
-                    "Major Shareholder": [
-                        "Titan Asset Management (Christo Wiese)", 
-                        "Public Investment Corporation (PIC)", 
-                        "Mianzo Asset Management", 
-                        "Foord Asset Management", 
-                        "Directors & Insiders"
-                    ],
-                    "Estimated %": ["38.4%", "14.2%", "5.1%", "3.8%", "2.5%"]
-                }
-                df_fallback = pd.DataFrame(fallback_data)
-                st.table(df_fallback)
 
 if __name__ == "__main__":
     main()
