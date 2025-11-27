@@ -95,8 +95,7 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
-        # Fetch longer history for 200 SMA calculation
-        history = stock.history(period="2y") 
+        history = stock.history(period="2y") # Fetch 2y for SMA calc
         info = stock.info
         financials = stock.financials
         balance_sheet = stock.balance_sheet
@@ -114,6 +113,8 @@ def get_competitor_financials():
         try:
             stock = yf.Ticker(sym)
             hist = stock.history(period="1y")
+            
+            # Normalize Growth
             if not hist.empty:
                 start_price = hist['Close'].iloc[0]
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
@@ -123,9 +124,259 @@ def get_competitor_financials():
                 current_price = 0
 
             info = stock.info
+            
+            # Safe extraction to prevent syntax errors
+            pe = info.get('trailingPE', 0)
+            div_yield = (info.get('dividendYield', 0) or 0) * 100
+            m_cap = (info.get('marketCap', 0) or 0) / 1e9
+            
             metrics.append({
                 "Company": name,
                 "Price": current_price,
-                "P/E Ratio": info.get('trailingPE', 0),
-                "Div Yield (%)": (info.get('dividendYield', 0) or 0) * 100,
-                "Market Cap (B)": (info.get('marketC
+                "P/E Ratio": pe,
+                "Div Yield (%)": div_yield,
+                "Market Cap (B)": m_cap,
+                "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
+            })
+        except:
+            continue
+            
+    return pd.DataFrame(metrics), history_df
+
+@st.cache_data(ttl=3600)
+def fetch_news_score(query, article_limit=5):
+    encoded = query.replace(" ", "%20")
+    rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
+    feed = feedparser.parse(rss_url)
+    
+    if not feed.entries: return 0.0, []
+    
+    news_items = []
+    limit = min(len(feed.entries), article_limit)
+    
+    for entry in feed.entries[:limit]:
+        real_url = get_final_url(entry.link)
+        full_text = get_article_content(real_url)
+        
+        if full_text:
+            score, label, icon, expl = analyze_content(full_text, "Full Text")
+            snippet = full_text[:300] + "..."
+            method = "✅ Full Text"
+        else:
+            raw_desc = entry.get('description', entry.title)
+            import re
+            clean_desc = re.sub('<.*?>', '', raw_desc)
+            score, label, icon, expl = analyze_content(clean_desc, "Snippet")
+            snippet = clean_desc
+            method = "⚠️ Snippet"
+            
+        try:
+            dt = parsedate_to_datetime(entry.published)
+            clean_date = dt.strftime("%d %b %Y")
+        except:
+            clean_date = "Recent"
+
+        news_items.append({
+            "title": entry.title,
+            "link": real_url,
+            "source": entry.source.title if hasattr(entry, 'source') else "News",
+            "date": clean_date,
+            "snippet": snippet,
+            "Sentiment": label,
+            "Icon": icon,
+            "Score": score,
+            "Explanation": expl,
+            "Method": method
+        })
+        
+    avg_score = pd.DataFrame(news_items)['Score'].mean() if news_items else 0.0
+    return avg_score, news_items
+
+# --- MAIN APP ---
+def main():
+    # --- SIDEBAR CONTROLS ---
+    st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/JSE_Logo.png/640px-JSE_Logo.png", width=100)
+    st.sidebar.title("Controls")
+    display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
+    
+    st.title("🏭 Invicta Holdings (IVT)")
+    st.caption("Strategic Intelligence Dashboard")
+
+    # 1. FETCH MAIN DATA
+    history_full, info, financials, balance_sheet = get_market_data("IVT.JO", period="2y")
+    
+    if not history_full.empty:
+        # Technicals
+        history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
+        history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
+        
+        delta = history_full['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        history_full['RSI'] = 100 - (100 / (1 + rs))
+        
+        history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
+
+        # Slice Data
+        if display_period == "3mo": slice_days = 90
+        elif display_period == "6mo": slice_days = 180
+        elif display_period == "1y": slice_days = 365
+        else: slice_days = 730
+        
+        history = history_full.tail(slice_days).copy()
+        
+        curr = history['Close'].iloc[-1]
+        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        current_rsi = history['RSI'].iloc[-1]
+        
+        # --- TOP LEVEL METRICS ---
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
+        m2.metric("P/E Ratio", f"{info.get('trailingPE', 'N/A')}")
+        m3.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
+        m4.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+
+        # --- TABS ---
+        tab_market, tab_fin, tab_comp, tab_sent = st.tabs([
+            "📈 Market & Technicals", 
+            "📊 Financial Health & Ratios",
+            "📊 Competitor Benchmarks", 
+            "📰 AI Sentiment"
+        ])
+
+        # --- TAB 1: MARKET & TECHNICALS ---
+        with tab_market:
+            c_main, c_sidebar = st.columns([3, 1])
+            with c_main:
+                st.subheader("Technical Price Analysis")
+                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+                fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
+                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_200'], line=dict(color='firebrick', width=1.5), name="200-Day SMA"), row=1, col=1)
+                colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
+                fig.add_trace(go.Bar(x=history.index, y=history['Volume'], marker_color=colors, name="Volume"), row=2, col=1)
+                fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
+                fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
+                fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
+                fig.update_yaxes(title_text="Volume", row=2, col=1)
+                st.plotly_chart(fig, use_container_width=True)
+                st.info("💡 **Legend:** 🔵 **Blue Line** = 50-Day Avg | 🔴 **Red Line** = 200-Day Avg. If Blue crosses above Red, it's a 'Golden Cross' (Bullish).")
+
+            with c_sidebar:
+                st.subheader("Trading Data")
+                high_52 = history_full['High'].tail(252).max()
+                low_52 = history_full['Low'].tail(252).min()
+                st.metric("52-Week High", f"R {high_52:.2f}")
+                st.metric("52-Week Low", f"R {low_52:.2f}")
+                st.markdown("---")
+                volatility = history['Close'].pct_change().std() * (252**0.5) * 100
+                st.metric("Annualized Volatility", f"{volatility:.1f}%")
+                st.markdown("---")
+                st.markdown("**Trend Status**")
+                sma_200_val = history['SMA_200'].iloc[-1]
+                if curr > sma_200_val: st.success("Long-Term: Bullish")
+                else: st.error("Long-Term: Bearish")
+
+        # --- TAB 2: FINANCIAL HEALTH (NEW) ---
+        with tab_fin:
+            st.subheader("Financial Performance & Ratio Analysis")
+            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
+            rev = info.get('totalRevenue')
+            ebitda = info.get('ebitda')
+            net_income = info.get('netIncomeToCommon')
+            total_cash = info.get('totalCash')
+            col_f1.metric("Total Revenue", format_large_number(rev))
+            col_f2.metric("EBITDA", format_large_number(ebitda))
+            col_f3.metric("Net Income", format_large_number(net_income))
+            col_f4.metric("Total Cash", format_large_number(total_cash))
+            st.divider()
+            c_prof, c_solv, c_chart = st.columns([1, 1, 2])
+            with c_prof:
+                st.markdown("#### 💎 Profitability & Efficiency")
+                st.write(f"**Gross Margin:** {info.get('grossMargins', 0)*100:.2f}%")
+                st.write(f"**Operating Margin:** {info.get('operatingMargins', 0)*100:.2f}%")
+                st.write(f"**Return on Equity (ROE):** {info.get('returnOnEquity', 0)*100:.2f}%")
+                st.write(f"**Return on Assets (ROA):** {info.get('returnOnAssets', 0)*100:.2f}%")
+            with c_solv:
+                st.markdown("#### ⚖️ Solvency & Liquidity")
+                st.write(f"**Current Ratio:** {info.get('currentRatio', 'N/A')}")
+                st.write(f"**Quick Ratio:** {info.get('quickRatio', 'N/A')}")
+                st.write(f"**Debt-to-Equity:** {info.get('debtToEquity', 'N/A')}")
+                st.write(f"**Total Debt:** {format_large_number(info.get('totalDebt'))}")
+            with c_chart:
+                st.markdown("#### 📅 Annual Performance (Last 4 Years)")
+                if not financials.empty:
+                    fin_T = financials.T 
+                    fin_T = fin_T.iloc[:4] if len(fin_T) >= 4 else fin_T
+                    fin_T = fin_T.iloc[::-1]
+                    try:
+                        fig_fin = go.Figure()
+                        fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Total Revenue', marker_color='#1f77b4'))
+                        fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
+                        fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
+                        st.plotly_chart(fig_fin, use_container_width=True)
+                    except:
+                        st.warning("Historical chart unavailable.")
+                else:
+                    st.warning("Financial history unavailable.")
+
+        # --- TAB 3: COMPETITORS ---
+        with tab_comp:
+            st.markdown("### ⚔️ Invicta vs. Hudaco vs. Barloworld")
+            with st.spinner("Analyzing Peers..."):
+                comp_metrics, comp_history = get_competitor_financials()
+            
+            if not comp_metrics.empty:
+                col_c1, col_c2 = st.columns([3, 2])
+                with col_c1:
+                    st.markdown("**1-Year Relative Performance**")
+                    fig_rel = go.Figure()
+                    colors = {"Invicta (IVT)": "#1f77b4", "Hudaco (HDC)": "#d62728", "Barloworld (BAW)": "#2ca02c"}
+                    for col in comp_history.columns:
+                        width = 4 if "Invicta" in col else 2
+                        fig_rel.add_trace(go.Scatter(x=comp_history.index, y=comp_history[col], mode='lines', name=col, line=dict(width=width, color=colors.get(col, "gray"))))
+                    fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0), yaxis_title="Growth %")
+                    st.plotly_chart(fig_rel, use_container_width=True)
+                with col_c2:
+                    st.markdown("**Valuation Table**")
+                    styled_df = comp_metrics.copy()
+                    styled_df['Price'] = styled_df['Price'].apply(lambda x: f"R {x:.2f}")
+                    styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
+                    styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
+                    styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
+                    styled_df.drop(columns=['1Y Return (%)'], inplace=True)
+                    st.dataframe(styled_df, hide_index=True, use_container_width=True)
+
+        # --- TAB 4: SENTIMENT ---
+        with tab_sent:
+            with st.spinner("AI is reading the news..."):
+                ivt_score, ivt_news = fetch_news_score("Invicta Holdings Limited", article_limit=6)
+                hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
+                baw_score, _ = fetch_news_score("Barloworld Limited", article_limit=3)
+
+            s1, s2 = st.columns([1, 2])
+            with s1:
+                st.markdown("#### Sentiment Battle")
+                comp_data = {'Company': ['Invicta', 'Hudaco', 'Barloworld'], 'Score': [ivt_score, hdc_score, baw_score]}
+                df_comp = pd.DataFrame(comp_data)
+                fig_comp = go.Figure(go.Bar(x=df_comp['Score'], y=df_comp['Company'], orientation='h', marker_color=['#1f77b4', '#d62728', '#2ca02c']))
+                fig_comp.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0), xaxis_title="Score (-1 to +1)")
+                st.plotly_chart(fig_comp, use_container_width=True)
+                
+            with s2:
+                st.markdown("#### Invicta News Feed")
+                if ivt_news:
+                    for item in ivt_news:
+                        with st.expander(f"{item['Icon']} {item['title']}"):
+                            c_t, c_i = st.columns([3, 1])
+                            with c_t:
+                                st.caption(f"{item['source']} | {item['date']}")
+                                st.write(item['Explanation'])
+                                st.markdown(f"[Read Article]({item['link']})")
+                            with c_i:
+                                st.progress((item['Score'] + 1) / 2)
+                                st.caption(f"Impact: {item['Score']:.2f}")
+
+if __name__ == "__main__":
+    main()
