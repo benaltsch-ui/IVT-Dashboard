@@ -63,7 +63,6 @@ def calculate_change(current, previous):
         return 0.0
 
 def safe_get_financial_value(df, metric_name, col_index=0):
-    """Safely retrieves a value from the financials dataframe without crashing."""
     try:
         if df.empty: return 0
         if metric_name in df.index:
@@ -262,34 +261,28 @@ def main():
     
     if not history_full.empty:
         # --- TECHNICAL CALCULATIONS ---
-        # SMAs
         history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
         history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
         
-        # RSI
         delta = history_full['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         history_full['RSI'] = 100 - (100 / (1 + rs))
         
-        # MACD (New)
         history_full['EMA_12'] = history_full['Close'].ewm(span=12, adjust=False).mean()
         history_full['EMA_26'] = history_full['Close'].ewm(span=26, adjust=False).mean()
         history_full['MACD'] = history_full['EMA_12'] - history_full['EMA_26']
         history_full['Signal_Line'] = history_full['MACD'].ewm(span=9, adjust=False).mean()
 
-        # Volume
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
-        # Slicing for Chart
         if display_period == "3mo": slice_days = 90
         elif display_period == "6mo": slice_days = 180
         elif display_period == "1y": slice_days = 365
         else: slice_days = 730
         history = history_full.tail(slice_days).copy()
         
-        # --- METRICS ---
         curr = history['Close'].iloc[-1]
         prev = history['Close'].iloc[-2]
         pct = ((curr - prev) / prev) * 100
@@ -340,37 +333,17 @@ def main():
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # --- LEGEND SECTION ---
-                with st.expander("📘 How to Read Technical Indicators (Legend)"):
-                    st.markdown("""
-                    ### 1. Trend Indicators (SMA)
-                    **Simple Moving Average (SMA):** The average price over a specific period.
-                    *   🔵 **50-Day SMA:** Represents the short-term trend.
-                    *   🔴 **200-Day SMA:** Represents the long-term trend.
-                    *   **Bullish:** Price > SMA lines. **Bearish:** Price < SMA lines.
-                    *   **Golden Cross:** When 50 SMA crosses *above* 200 SMA (Strong Buy).
-                    *   **Death Cross:** When 50 SMA crosses *below* 200 SMA (Strong Sell).
-
-                    ### 2. Momentum (RSI)
-                    **Relative Strength Index (0-100):** Measures the speed of price changes.
-                    *   🔴 **> 70 (Overbought):** Price has risen too fast, potential drop incoming.
-                    *   🟢 **< 30 (Oversold):** Price has fallen too fast, potential bounce incoming.
-                    *   ⚪ **30-70:** Neutral zone.
-
-                    ### 3. MACD (Trend & Momentum)
-                    **Moving Average Convergence Divergence:**
-                    *   **Positive Divergence:** The MACD line crosses *above* the Signal line (Bullish/Buy).
-                    *   **Negative Divergence:** The MACD line crosses *below* the Signal line (Bearish/Sell).
-
-                    ### 4. Volume
-                    *   **Green Bars:** Buying pressure (Price closed higher than it opened).
-                    *   **Red Bars:** Selling pressure (Price closed lower than it opened).
-                    """)
+                # --- NEW FIXED SUMMARY LEGEND ---
+                st.markdown("### 🔑 Quick Chart Legend")
+                l1, l2, l3, l4 = st.columns(4)
+                l1.info("**SMA (Trend)**\n\nPrice > Lines = 🟢 Bullish\n\nPrice < Lines = 🔴 Bearish")
+                l2.info("**RSI (Momentum)**\n\n> 70 = High/Sell ⚠️\n\n< 30 = Low/Buy 🟢")
+                l3.info("**MACD (Signal)**\n\nLine > Signal = 🟢 Positive\n\nLine < Signal = 🔴 Negative")
+                l4.info("**Volume**\n\nGreen = Buying Pressure\n\nRed = Selling Pressure")
 
             with c_sidebar:
                 st.subheader("💡 AI Technical Verdict")
                 
-                # Trend Logic
                 if curr > sma_50_val and curr > sma_200_val:
                     trend_msg = "Bullish (Above SMA 50 & 200)"
                     trend_icon = "🟢"
@@ -381,7 +354,6 @@ def main():
                     trend_msg = "Neutral / Consolidation"
                     trend_icon = "⚪"
                 
-                # Momentum Logic
                 if current_rsi > 70:
                     mom_msg = "Overbought (Risk of Pullback)"
                     mom_icon = "⚠️"
@@ -392,7 +364,6 @@ def main():
                     mom_msg = "Stable Momentum"
                     mom_icon = "✅"
                     
-                # MACD Logic
                 if macd_val > signal_val:
                     macd_msg = "Positive Divergence"
                 else:
@@ -463,51 +434,72 @@ def main():
 
             st.divider()
 
-            # 2. INTERIM / FALLBACK
-            st.markdown("### ⏱️ Year to Date / Recent Trend")
+            # 2. INTERIM (SEPTEMBER) LOGIC
+            st.markdown("### ⏱️ Year to Date / Interim (September Trend)")
             
-            has_quarterly = not quarterly_fin.empty and quarterly_fin.shape[1] >= 2
-            
-            if has_quarterly:
-                st.caption(f"Comparing most recent reported period vs prior period.")
-                q_latest = quarterly_fin.columns[0]
-                q_prev = quarterly_fin.columns[1]
-                
+            # Search for September column
+            sept_col = None
+            if not quarterly_fin.empty:
+                for col in quarterly_fin.columns:
+                    # Looking for Month 9 (Sept)
+                    if isinstance(col, pd.Timestamp) and col.month == 9:
+                        sept_col = col
+                        break
+
+            # If September data is found
+            if sept_col:
+                st.caption(f"Showing Interim Data for: {sept_col.strftime('%B %Y')}")
                 q_metrics = ['Total Revenue', 'Net Income', 'Operating Income']
                 q_data = []
                 for m in q_metrics:
-                    q_curr = safe_get_financial_value(quarterly_fin, m, 0)
-                    q_last = safe_get_financial_value(quarterly_fin, m, 1)
+                    # Get Value from Sept Column
+                    q_curr = quarterly_fin.loc[m, sept_col] if m in quarterly_fin.index else 0
+                    
+                    # Try to compare with Previous Interim (Sept last year) or Just Previous Quarter
+                    # Ideally we want year-on-year interim (Sept vs Sept)
+                    prev_sept_col = None
+                    for col in quarterly_fin.columns:
+                        if isinstance(col, pd.Timestamp) and col.month == 9 and col.year == (sept_col.year - 1):
+                            prev_sept_col = col
+                            break
+                    
+                    if prev_sept_col:
+                        q_last = quarterly_fin.loc[m, prev_sept_col] if m in quarterly_fin.index else 0
+                        compare_label = f"Sept {prev_sept_col.year}"
+                    else:
+                        # Fallback to sequential previous if YoY not found
+                        q_last = 0 # Cannot accurately compare if we don't have history
+                        compare_label = "Prior Period"
+
                     if q_curr != 0:
                         q_chg = calculate_change(q_curr, q_last)
                         q_data.append({
                             "Metric": m,
-                            "Period": q_latest.strftime('%b %Y'),
+                            "Period": sept_col.strftime('%b %Y'),
                             "Current": format_large_number(q_curr),
-                            "Prior": format_large_number(q_last),
+                            compare_label: format_large_number(q_last),
                             "Change (%)": f"{q_chg:+.2f}%"
                         })
                 st.dataframe(pd.DataFrame(q_data), use_container_width=True, hide_index=True)
             
             else:
-                st.info("Detailed Interim data unavailable via API. Showing TTM vs Last Annual.")
+                # FALLBACK (When Sept data is missing from API)
+                st.info("September Interim data not returned by Yahoo Finance API. Displaying Trailing 12 Months (TTM) as proxy.")
                 ttm_data = []
                 
                 rev_ttm = info.get('totalRevenue', 0)
                 rev_last = safe_get_financial_value(financials, 'Total Revenue', 0)
-                ttm_data.append({"Metric": "Revenue", "TTM (Current)": format_large_number(rev_ttm), "Last Annual": format_large_number(rev_last)})
+                ttm_data.append({"Metric": "Revenue", "TTM (Rolling 12M)": format_large_number(rev_ttm), "Last Annual (Mar)": format_large_number(rev_last)})
                 
                 ebitda_ttm = info.get('ebitda', 0)
                 ebitda_last = safe_get_financial_value(financials, 'EBITDA', 0)
-                ttm_data.append({"Metric": "EBITDA", "TTM (Current)": format_large_number(ebitda_ttm), "Last Annual": format_large_number(ebitda_last)})
+                ttm_data.append({"Metric": "EBITDA", "TTM (Rolling 12M)": format_large_number(ebitda_ttm), "Last Annual (Mar)": format_large_number(ebitda_last)})
 
                 st.dataframe(pd.DataFrame(ttm_data), use_container_width=True, hide_index=True)
 
-            # --- CHART WITH FIXED DATE FORMATTING ---
+            # --- CHART ---
             if not financials.empty:
                 fin_T = financials.T.iloc[:4][::-1]
-                
-                # --- DATE FORMATTING LOGIC ---
                 try:
                     formatted_dates = [d.strftime('%b %Y') if isinstance(d, pd.Timestamp) else str(d) for d in fin_T.index]
                 except:
