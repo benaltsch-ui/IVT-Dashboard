@@ -25,12 +25,20 @@ def load_sentiment_resources():
     
     sia = SentimentIntensityAnalyzer()
     
+    # Financial Dictionary (Customized)
     financial_lexicon = {
+        # Standard Market Terms
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
         'dividend': 2.0, 'earnings': 1.5, 'profit': 2.0, 'growth': 2.0,
         'resilient': 2.0, 'strong': 2.0, 'up': 1.0, 'down': -1.0,
-        'acquisition': 1.5, 'buyback': 1.5, 'challenging': -1.0, 'headwinds': -1.5
+        'acquisition': 1.5, 'buyback': 1.5, 'challenging': -1.0, 'headwinds': -1.5,
+        
+        # FIXES FOR CONTEXT (Based on user feedback)
+        'ghost': 0.0,   # Ignore "Finance Ghost" writer name
+        'busy': 1.0,    # Busy usually means active/good in business
+        'mixed': 0.0,   # Mixed results = Neutral
+        'flat': -0.5    # Flat earnings = Slight negative
     }
     sia.lexicon.update(financial_lexicon)
     return sia
@@ -102,32 +110,23 @@ def get_market_data(ticker, period="1y"):
 
 @st.cache_data(ttl=3600) 
 def get_macro_data(period="1y"):
-    """
-    Robust fetcher for Macro data. Handles Timezone mismatches.
-    """
     tickers = {
         "Invicta": "IVT.JO",
         "USD/ZAR": "ZAR=X",
         "JSE Industrials": "STXIND.JO",
         "Gold": "GC=F"
     }
-    
     data = pd.DataFrame()
-    
     for name, ticker in tickers.items():
         try:
             hist = yf.Ticker(ticker).history(period=period)
             if not hist.empty:
-                # --- CRITICAL FIX: REMOVE TIMEZONE ---
-                # This aligns JSE time (SAST) with Forex time (UTC)
+                # Timezone alignment fix
                 hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
         except:
             continue 
-            
-    # Forward fill to handle holidays/weekends differently
-    data = data.ffill().bfill()
-    return data
+    return data.ffill().bfill()
 
 @st.cache_data(ttl=3600) 
 def get_competitor_financials():
@@ -227,10 +226,10 @@ def main():
     history_full, info, financials, balance_sheet = get_market_data("IVT.JO", period="2y")
     
     if not history_full.empty:
+        # --- CALCULATIONS ---
         # Technicals
         history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
         history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
-        
         delta = history_full['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
@@ -238,24 +237,32 @@ def main():
         history_full['RSI'] = 100 - (100 / (1 + rs))
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
-        # Slice Data
+        # Slice for display
         if display_period == "3mo": slice_days = 90
         elif display_period == "6mo": slice_days = 180
         elif display_period == "1y": slice_days = 365
         else: slice_days = 730
-        
         history = history_full.tail(slice_days).copy()
         
+        # --- KEY METRICS EXTRACTION ---
         curr = history['Close'].iloc[-1]
         pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
         current_rsi = history['RSI'].iloc[-1]
         
-        m1, m2, m3, m4 = st.columns(4)
+        eps = info.get('trailingEps', 0)
+        pe_ratio = info.get('trailingPE', 0)
+        div_yield = info.get('dividendYield', 0)
+        
+        # --- TOP LEVEL METRICS ROW ---
+        m1, m2, m3, m4, m5 = st.columns(5)
+        
         m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
-        m2.metric("P/E Ratio", f"{info.get('trailingPE', 'N/A')}")
-        m3.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
-        m4.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
+        m2.metric("EPS (TTM)", f"R {eps:.2f}" if eps else "N/A")
+        m3.metric("P/E Ratio", f"{pe_ratio:.2f}" if pe_ratio else "N/A")
+        m4.metric("Dividend Yield", f"{div_yield*100:.2f}%" if div_yield else "N/A")
+        m5.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
+        # --- TABS ---
         tab_market, tab_macro, tab_fin, tab_comp, tab_sent = st.tabs([
             "📈 Market & Technicals",
             "🔗 Macro & Correlations", 
@@ -264,6 +271,7 @@ def main():
             "📰 AI Sentiment"
         ])
 
+        # --- TAB 1: MARKET & TECHNICALS ---
         with tab_market:
             c_main, c_sidebar = st.columns([3, 1])
             with c_main:
@@ -283,6 +291,11 @@ def main():
 
             with c_sidebar:
                 st.subheader("Trading Stats")
+                
+                # RSI Metric moved here
+                st.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
+                st.markdown("---")
+                
                 high_52 = history_full['High'].tail(252).max()
                 low_52 = history_full['Low'].tail(252).min()
                 st.metric("52-Week High", f"R {high_52:.2f}")
@@ -295,6 +308,7 @@ def main():
                 if curr > sma_200_val: st.success("Trend: Bullish (Above 200 SMA)")
                 else: st.error("Trend: Bearish (Below 200 SMA)")
 
+        # --- TAB 2: MACRO ---
         with tab_macro:
             st.subheader("🔗 Macro-Economic Correlations")
             st.caption("Comparing Invicta against Currency (USD/ZAR), Mining (Gold), and Sector benchmarks.")
@@ -307,16 +321,13 @@ def main():
                 
                 with c_charts:
                     st.markdown("#### 🌍 Relative Performance Comparison")
-                    # Normalize to start at 0%
                     norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
                     fig_macro = go.Figure()
-                    
                     colors = {'Invicta': '#1f77b4', 'USD/ZAR': 'orange', 'JSE Industrials': 'gray', 'Gold': '#ffd700'}
                     for col in norm_df.columns:
                         width = 3 if col == 'Invicta' else 1.5
                         dash = 'solid' if col == 'Invicta' else 'dot'
                         fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], name=col, line=dict(color=colors.get(col, 'black'), width=width, dash=dash)))
-                    
                     fig_macro.update_layout(height=400, yaxis_title="Performance (%)", hovermode="x unified")
                     st.plotly_chart(fig_macro, use_container_width=True)
                     
@@ -338,10 +349,9 @@ def main():
             else:
                 st.warning("Macro data temporarily unavailable. Please refresh.")
 
+        # --- TAB 3: FINANCIAL HEALTH ---
         with tab_fin:
             st.subheader("Financial Performance & Ratios")
-            
-            # Source & Date
             most_recent_timestamp = info.get('mostRecentQuarter')
             if most_recent_timestamp:
                 report_date = datetime.datetime.fromtimestamp(most_recent_timestamp).strftime('%d %B %Y')
@@ -378,6 +388,7 @@ def main():
                     fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
                     st.plotly_chart(fig_fin, use_container_width=True)
 
+        # --- TAB 4: COMPETITORS ---
         with tab_comp:
             st.markdown("### ⚔️ Invicta vs. Hudaco vs. Barloworld")
             with st.spinner("Analyzing Peers..."):
@@ -404,6 +415,7 @@ def main():
                     styled_df.drop(columns=['1Y Return (%)'], inplace=True)
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
+        # --- TAB 5: SENTIMENT ---
         with tab_sent:
             with st.spinner("AI is reading the news..."):
                 ivt_score, ivt_news = fetch_news_score("Invicta Holdings", article_limit=6)
