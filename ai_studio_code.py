@@ -258,7 +258,7 @@ def fetch_news_score(query, article_limit=5):
 
 # --- MAIN APP ---
 def main():
-    st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/JSE_Logo.png/640px-JSE_Logo.png", width=100)
+    # REMOVED BROKEN IMAGE LINK HERE
     st.sidebar.title("Controls")
     display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
     
