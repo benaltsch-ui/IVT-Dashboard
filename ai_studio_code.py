@@ -103,7 +103,7 @@ def get_market_data(ticker, period="1y"):
 @st.cache_data(ttl=3600) 
 def get_macro_data(period="1y"):
     """
-    Robust fetcher for Macro data. Ignores failed tickers instead of crashing.
+    Robust fetcher for Macro data. Handles Timezone mismatches.
     """
     tickers = {
         "Invicta": "IVT.JO",
@@ -118,13 +118,15 @@ def get_macro_data(period="1y"):
         try:
             hist = yf.Ticker(ticker).history(period=period)
             if not hist.empty:
-                # Use 'Close' price and rename to the asset name
+                # --- CRITICAL FIX: REMOVE TIMEZONE ---
+                # This aligns JSE time (SAST) with Forex time (UTC)
+                hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
         except:
-            continue # If one fails (e.g. Gold), just skip it
+            continue 
             
-    # Forward fill to handle different timezone holidays
-    data = data.ffill().dropna()
+    # Forward fill to handle holidays/weekends differently
+    data = data.ffill().bfill()
     return data
 
 @st.cache_data(ttl=3600) 
@@ -137,6 +139,7 @@ def get_competitor_financials():
         try:
             stock = yf.Ticker(sym)
             hist = stock.history(period="1y")
+            
             if not hist.empty:
                 start_price = hist['Close'].iloc[0]
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
@@ -146,12 +149,16 @@ def get_competitor_financials():
                 current_price = 0
 
             info = stock.info
+            pe = info.get('trailingPE', 0)
+            div_yield = (info.get('dividendYield', 0) or 0) * 100
+            m_cap = (info.get('marketCap', 0) or 0) / 1e9
+            
             metrics.append({
                 "Company": name,
                 "Price": current_price,
-                "P/E Ratio": info.get('trailingPE', 0),
-                "Div Yield (%)": (info.get('dividendYield', 0) or 0) * 100,
-                "Market Cap (B)": (info.get('marketCap', 0) or 0) / 1e9,
+                "P/E Ratio": pe,
+                "Div Yield (%)": div_yield,
+                "Market Cap (B)": m_cap,
                 "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
             })
         except:
@@ -399,7 +406,6 @@ def main():
 
         with tab_sent:
             with st.spinner("AI is reading the news..."):
-                # Simplified names to find broader news matches
                 ivt_score, ivt_news = fetch_news_score("Invicta Holdings", article_limit=6)
                 hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
                 baw_score, _ = fetch_news_score("Barloworld", article_limit=3)
