@@ -2,7 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
-import plotly.express as px  # Added for Heatmap
+import plotly.express as px
 from plotly.subplots import make_subplots
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -69,7 +69,6 @@ def get_article_content(url):
 
 def analyze_content(text, method="Snippet"):
     score = sia.polarity_scores(text)['compound']
-    
     if score >= 0.05: label, icon = "Positive", "🟢"
     elif score <= -0.05: label, icon = "Negative", "🔴"
     else: label, icon = "Neutral", "⚪"
@@ -93,7 +92,7 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
-        history = stock.history(period="2y") # Fetch 2y for Technicals
+        history = stock.history(period="2y") 
         info = stock.info
         financials = stock.financials
         balance_sheet = stock.balance_sheet
@@ -104,30 +103,27 @@ def get_market_data(ticker, period="1y"):
 @st.cache_data(ttl=3600) 
 def get_macro_data(period="1y"):
     """
-    Fetches Macro Benchmarks:
-    - IVT.JO (Invicta)
-    - ZAR=X (USD/ZAR)
-    - STXIND.JO (Satrix Industrials ETF - Sector Benchmark)
-    - GC=F (Gold - Mining Sector Health Proxy)
+    Robust fetcher for Macro data. Ignores failed tickers instead of crashing.
     """
     tickers = {
         "Invicta": "IVT.JO",
         "USD/ZAR": "ZAR=X",
-        "JSE Industrials (Satrix)": "STXIND.JO",
-        "Gold Price": "GC=F"
+        "JSE Industrials": "STXIND.JO",
+        "Gold": "GC=F"
     }
     
     data = pd.DataFrame()
+    
     for name, ticker in tickers.items():
         try:
-            hist = yf.Ticker(ticker).history(period=period)['Close']
-            # Normalize to start at 0%
+            hist = yf.Ticker(ticker).history(period=period)
             if not hist.empty:
-                data[name] = hist
+                # Use 'Close' price and rename to the asset name
+                data[name] = hist['Close']
         except:
-            continue
+            continue # If one fails (e.g. Gold), just skip it
             
-    # Forward fill missing data (holidays diff between US/SA)
+    # Forward fill to handle different timezone holidays
     data = data.ffill().dropna()
     return data
 
@@ -141,7 +137,6 @@ def get_competitor_financials():
         try:
             stock = yf.Ticker(sym)
             hist = stock.history(period="1y")
-            
             if not hist.empty:
                 start_price = hist['Close'].iloc[0]
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
@@ -215,7 +210,6 @@ def fetch_news_score(query, article_limit=5):
 
 # --- MAIN APP ---
 def main():
-    # --- SIDEBAR CONTROLS ---
     st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/8/87/JSE_Logo.png/640px-JSE_Logo.png", width=100)
     st.sidebar.title("Controls")
     display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
@@ -223,7 +217,6 @@ def main():
     st.title("🏭 Invicta Holdings (IVT)")
     st.caption("Strategic Intelligence Dashboard")
 
-    # 1. FETCH MAIN DATA
     history_full, info, financials, balance_sheet = get_market_data("IVT.JO", period="2y")
     
     if not history_full.empty:
@@ -236,7 +229,6 @@ def main():
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         history_full['RSI'] = 100 - (100 / (1 + rs))
-        
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
         # Slice Data
@@ -251,14 +243,12 @@ def main():
         pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
         current_rsi = history['RSI'].iloc[-1]
         
-        # --- TOP LEVEL METRICS ---
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
         m2.metric("P/E Ratio", f"{info.get('trailingPE', 'N/A')}")
         m3.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
         m4.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
-        # --- TABS ---
         tab_market, tab_macro, tab_fin, tab_comp, tab_sent = st.tabs([
             "📈 Market & Technicals",
             "🔗 Macro & Correlations", 
@@ -267,11 +257,10 @@ def main():
             "📰 AI Sentiment"
         ])
 
-        # --- TAB 1: MARKET & TECHNICALS ---
         with tab_market:
             c_main, c_sidebar = st.columns([3, 1])
             with c_main:
-                st.subheader("Price Action")
+                st.subheader("Price & Volume Analysis")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
                 fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
@@ -283,11 +272,10 @@ def main():
                 fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
                 fig.update_yaxes(title_text="Volume", row=2, col=1)
                 st.plotly_chart(fig, use_container_width=True)
-                
-                st.info("💡 **Legend:** 🔵 **Blue Line** = 50-Day Avg | 🔴 **Red Line** = 200-Day Avg. If Blue crosses above Red, it's a 'Golden Cross' (Bullish).")
+                st.info("💡 **Chart Guide:** 🔵 **50-Day SMA** (Short Trend) | 🔴 **200-Day SMA** (Long Trend). **Volume:** Green Bars = Buying Pressure, Red Bars = Selling Pressure.")
 
             with c_sidebar:
-                st.subheader("Trading Data")
+                st.subheader("Trading Stats")
                 high_52 = history_full['High'].tail(252).max()
                 low_52 = history_full['Low'].tail(252).min()
                 st.metric("52-Week High", f"R {high_52:.2f}")
@@ -296,73 +284,57 @@ def main():
                 volatility = history['Close'].pct_change().std() * (252**0.5) * 100
                 st.metric("Annualized Volatility", f"{volatility:.1f}%")
                 st.markdown("---")
-                st.markdown("**Trend Status**")
                 sma_200_val = history['SMA_200'].iloc[-1]
-                if curr > sma_200_val: st.success("Long-Term: Bullish")
-                else: st.error("Long-Term: Bearish")
+                if curr > sma_200_val: st.success("Trend: Bullish (Above 200 SMA)")
+                else: st.error("Trend: Bearish (Below 200 SMA)")
 
-        # --- TAB 2: MACRO & CORRELATIONS (NEW) ---
         with tab_macro:
             st.subheader("🔗 Macro-Economic Correlations")
-            st.caption("How Invicta moves against the Dollar, the Mining Sector (Gold), and the Industrial Index.")
+            st.caption("Comparing Invicta against Currency (USD/ZAR), Mining (Gold), and Sector benchmarks.")
             
-            with st.spinner("Crunching Macro Data..."):
+            with st.spinner("Analyzing macro data..."):
                 macro_df = get_macro_data(period=display_period)
             
-            if not macro_df.empty:
+            if not macro_df.empty and 'Invicta' in macro_df.columns:
                 c_charts, c_stats = st.columns([3, 1])
                 
                 with c_charts:
-                    # 1. Performance Comparison Chart
                     st.markdown("#### 🌍 Relative Performance Comparison")
-                    # Normalize all to 0 start
+                    # Normalize to start at 0%
                     norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
-                    
                     fig_macro = go.Figure()
-                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['Invicta'], name='Invicta (IVT)', line=dict(width=3, color='#1f77b4')))
-                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['USD/ZAR'], name='USD/ZAR', line=dict(dash='dot', color='orange')))
-                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['JSE Industrials (Satrix)'], name='JSE Industrials', line=dict(color='gray')))
-                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['Gold Price'], name='Gold', line=dict(color='#ffd700')))
+                    
+                    colors = {'Invicta': '#1f77b4', 'USD/ZAR': 'orange', 'JSE Industrials': 'gray', 'Gold': '#ffd700'}
+                    for col in norm_df.columns:
+                        width = 3 if col == 'Invicta' else 1.5
+                        dash = 'solid' if col == 'Invicta' else 'dot'
+                        fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], name=col, line=dict(color=colors.get(col, 'black'), width=width, dash=dash)))
                     
                     fig_macro.update_layout(height=400, yaxis_title="Performance (%)", hovermode="x unified")
                     st.plotly_chart(fig_macro, use_container_width=True)
                     
                 with c_stats:
-                    st.markdown("#### 🔢 Correlation Matrix")
-                    st.caption("1.0 = Moves perfectly together\n-1.0 = Moves exactly opposite")
+                    st.markdown("#### 🔢 Correlation")
+                    st.caption("Correlation with Invicta (1.0 = High, -1.0 = Inverse)")
+                    corr_matrix = macro_df.pct_change().corr()['Invicta'].drop('Invicta')
+                    st.dataframe(corr_matrix, use_container_width=True)
                     
-                    # Calculate Correlation
-                    corr_matrix = macro_df.pct_change().corr()
-                    
-                    # Heatmap
-                    fig_heat = px.imshow(
-                        corr_matrix, 
-                        text_auto=".2f",
-                        color_continuous_scale="RdBu_r", # Red = Negative, Blue = Positive
-                        zmin=-1, zmax=1
-                    )
-                    fig_heat.update_layout(height=300, coloraxis_showscale=False)
-                    st.plotly_chart(fig_heat, use_container_width=True)
-                    
-                # 2. Rolling Correlation (Rand Hedge Check)
                 st.divider()
                 st.markdown("#### 📉 Dynamic Relationship: Invicta vs USD/ZAR")
-                st.caption("Does Invicta act as a Rand Hedge? (If correlation is positive, Invicta rises when Rand weakens).")
-                
-                # Calculate Rolling 30-Day Correlation
-                rolling_corr = macro_df['Invicta'].rolling(window=30).corr(macro_df['USD/ZAR'])
-                
-                fig_roll = go.Figure()
-                fig_roll.add_trace(go.Scatter(x=macro_df.index, y=rolling_corr, fill='tozeroy', name='30-Day Correlation'))
-                fig_roll.add_hline(y=0, line_dash="dash", line_color="black")
-                fig_roll.update_layout(height=250, yaxis_title="Correlation", yaxis_range=[-1, 1])
-                st.plotly_chart(fig_roll, use_container_width=True)
+                if 'USD/ZAR' in macro_df.columns:
+                    rolling_corr = macro_df['Invicta'].rolling(window=30).corr(macro_df['USD/ZAR'])
+                    fig_roll = go.Figure()
+                    fig_roll.add_trace(go.Scatter(x=macro_df.index, y=rolling_corr, fill='tozeroy', name='30-Day Correlation'))
+                    fig_roll.add_hline(y=0, line_dash="dash", line_color="black")
+                    fig_roll.update_layout(height=250, yaxis_title="Correlation", yaxis_range=[-1, 1])
+                    st.plotly_chart(fig_roll, use_container_width=True)
+            else:
+                st.warning("Macro data temporarily unavailable. Please refresh.")
 
-        # --- TAB 3: FINANCIAL HEALTH ---
         with tab_fin:
-            st.subheader("Financial Performance & Ratio Analysis")
+            st.subheader("Financial Performance & Ratios")
             
-            # Extract date from metadata
+            # Source & Date
             most_recent_timestamp = info.get('mostRecentQuarter')
             if most_recent_timestamp:
                 report_date = datetime.datetime.fromtimestamp(most_recent_timestamp).strftime('%d %B %Y')
@@ -399,7 +371,6 @@ def main():
                     fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
                     st.plotly_chart(fig_fin, use_container_width=True)
 
-        # --- TAB 4: COMPETITORS ---
         with tab_comp:
             st.markdown("### ⚔️ Invicta vs. Hudaco vs. Barloworld")
             with st.spinner("Analyzing Peers..."):
@@ -426,12 +397,11 @@ def main():
                     styled_df.drop(columns=['1Y Return (%)'], inplace=True)
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
-        # --- TAB 5: SENTIMENT ---
         with tab_sent:
             with st.spinner("AI is reading the news..."):
-                # Broaden search for competitors to avoid blanks
-                ivt_score, ivt_news = fetch_news_score("Invicta Holdings Limited", article_limit=6)
-                hdc_score, _ = fetch_news_score("Hudaco", article_limit=3)
+                # Simplified names to find broader news matches
+                ivt_score, ivt_news = fetch_news_score("Invicta Holdings", article_limit=6)
+                hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
                 baw_score, _ = fetch_news_score("Barloworld", article_limit=3)
 
             s1, s2 = st.columns([1, 2])
