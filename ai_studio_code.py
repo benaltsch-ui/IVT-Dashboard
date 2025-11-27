@@ -100,7 +100,6 @@ def get_market_data(ticker, period="1y"):
         balance_sheet = stock.balance_sheet
         
         # --- FIX: Convert Cents to Rands ---
-        # JSE stocks often return price in Cents (e.g., 3000) but financials in Rands.
         if not history.empty:
             current_price = history['Close'].iloc[-1]
             if current_price > 500: # Threshold to detect if data is in Cents (ZAc)
@@ -126,8 +125,10 @@ def get_macro_data(period="1y"):
             if not hist.empty:
                 hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
+        except:
+            continue  # <--- FIXED: Added missing except block
     
-    # Normalize Invicta in macro data too if needed (simple check)
+    # Normalize Invicta in macro data too if needed
     if 'Invicta' in data.columns and data['Invicta'].mean() > 500:
         data['Invicta'] = data['Invicta'] / 100
         
@@ -146,7 +147,7 @@ def get_competitor_financials():
             info = stock.info
             
             if not hist.empty:
-                # Fix ZAc to ZAR for competitors too
+                # Fix ZAc to ZAR for competitors
                 if hist['Close'].iloc[-1] > 500:
                     hist['Close'] = hist['Close'] / 100
                 
@@ -269,23 +270,15 @@ def main():
         pe_ratio = info.get('trailingPE', 0)
         
         # --- DIVIDEND YIELD FIX ---
-        # Formula: (Annual Dividend / Share Price) * 100
-        # Data Cleaning: 
-        # 1. info['dividendRate'] is usually in Rands (e.g. 1.05)
-        # 2. curr is now in Rands (because we fixed it in get_market_data)
-        
         div_rate = info.get('dividendRate', None)
         
         if div_rate is not None and curr > 0:
-            # We have the actual Rand value of dividend (e.g. R1.05)
             calculated_yield = (div_rate / curr) * 100
         else:
-            # Fallback: Sometimes dividendRate is missing, use dividendYield from Yahoo
-            # Yahoo yield is usually a decimal (0.03). If it looks like integer (3.0), leave it.
             raw_yield = info.get('dividendYield', 0) or 0
-            if raw_yield > 0.5: # If 3.11, assume percent
+            if raw_yield > 0.5:
                 calculated_yield = raw_yield
-            else: # If 0.0311, convert to percent
+            else:
                 calculated_yield = raw_yield * 100
 
         # --- TOP LEVEL METRICS ROW ---
@@ -294,10 +287,7 @@ def main():
         m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
         m2.metric("EPS (TTM)", f"R {eps:.2f}" if eps else "N/A")
         m3.metric("P/E Ratio", f"{pe_ratio:.2f}" if pe_ratio else "N/A")
-        
-        # Corrected Yield Display
         m4.metric("Dividend Yield", f"{calculated_yield:.2f}%")
-        
         m5.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
         # --- TABS ---
@@ -329,11 +319,8 @@ def main():
 
             with c_sidebar:
                 st.subheader("Trading Stats")
-                
-                # RSI Metric
                 st.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
                 st.markdown("---")
-                
                 high_52 = history_full['High'].tail(252).max()
                 low_52 = history_full['Low'].tail(252).min()
                 st.metric("52-Week High", f"R {high_52:.2f}")
@@ -356,7 +343,6 @@ def main():
             
             if not macro_df.empty and 'Invicta' in macro_df.columns:
                 c_charts, c_stats = st.columns([3, 1])
-                
                 with c_charts:
                     st.markdown("#### 🌍 Relative Performance Comparison")
                     norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
