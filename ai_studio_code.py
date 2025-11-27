@@ -2,6 +2,7 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px  # Added for Heatmap
 from plotly.subplots import make_subplots
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -9,6 +10,7 @@ import feedparser
 import requests
 import trafilatura
 from email.utils import parsedate_to_datetime
+import datetime
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Invicta Holdings Pro Dashboard", layout="wide", page_icon="🏭")
@@ -23,7 +25,6 @@ def load_sentiment_resources():
     
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Dictionary
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -43,12 +44,9 @@ except Exception as e:
 # --- HELPER FUNCTIONS ---
 def format_large_number(num):
     if num is None: return "N/A"
-    if num >= 1e9:
-        return f"R {num/1e9:.2f} B"
-    elif num >= 1e6:
-        return f"R {num/1e6:.2f} M"
-    else:
-        return f"R {num:,.2f}"
+    if num >= 1e9: return f"R {num/1e9:.2f} B"
+    elif num >= 1e6: return f"R {num/1e6:.2f} M"
+    else: return f"R {num:,.2f}"
 
 def get_final_url(url):
     try:
@@ -95,13 +93,43 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
-        history = stock.history(period="2y") # Fetch 2y for SMA calc
+        history = stock.history(period="2y") # Fetch 2y for Technicals
         info = stock.info
         financials = stock.financials
         balance_sheet = stock.balance_sheet
         return history, info, financials, balance_sheet
     except:
         return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
+
+@st.cache_data(ttl=3600) 
+def get_macro_data(period="1y"):
+    """
+    Fetches Macro Benchmarks:
+    - IVT.JO (Invicta)
+    - ZAR=X (USD/ZAR)
+    - STXIND.JO (Satrix Industrials ETF - Sector Benchmark)
+    - GC=F (Gold - Mining Sector Health Proxy)
+    """
+    tickers = {
+        "Invicta": "IVT.JO",
+        "USD/ZAR": "ZAR=X",
+        "JSE Industrials (Satrix)": "STXIND.JO",
+        "Gold Price": "GC=F"
+    }
+    
+    data = pd.DataFrame()
+    for name, ticker in tickers.items():
+        try:
+            hist = yf.Ticker(ticker).history(period=period)['Close']
+            # Normalize to start at 0%
+            if not hist.empty:
+                data[name] = hist
+        except:
+            continue
+            
+    # Forward fill missing data (holidays diff between US/SA)
+    data = data.ffill().dropna()
+    return data
 
 @st.cache_data(ttl=3600) 
 def get_competitor_financials():
@@ -114,7 +142,6 @@ def get_competitor_financials():
             stock = yf.Ticker(sym)
             hist = stock.history(period="1y")
             
-            # Normalize Growth
             if not hist.empty:
                 start_price = hist['Close'].iloc[0]
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
@@ -124,18 +151,12 @@ def get_competitor_financials():
                 current_price = 0
 
             info = stock.info
-            
-            # Safe extraction to prevent syntax errors
-            pe = info.get('trailingPE', 0)
-            div_yield = (info.get('dividendYield', 0) or 0) * 100
-            m_cap = (info.get('marketCap', 0) or 0) / 1e9
-            
             metrics.append({
                 "Company": name,
                 "Price": current_price,
-                "P/E Ratio": pe,
-                "Div Yield (%)": div_yield,
-                "Market Cap (B)": m_cap,
+                "P/E Ratio": info.get('trailingPE', 0),
+                "Div Yield (%)": (info.get('dividendYield', 0) or 0) * 100,
+                "Market Cap (B)": (info.get('marketCap', 0) or 0) / 1e9,
                 "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
             })
         except:
@@ -238,9 +259,10 @@ def main():
         m4.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
         # --- TABS ---
-        tab_market, tab_fin, tab_comp, tab_sent = st.tabs([
-            "📈 Market & Technicals", 
-            "📊 Financial Health & Ratios",
+        tab_market, tab_macro, tab_fin, tab_comp, tab_sent = st.tabs([
+            "📈 Market & Technicals",
+            "🔗 Macro & Correlations", 
+            "📊 Financial Health",
             "📊 Competitor Benchmarks", 
             "📰 AI Sentiment"
         ])
@@ -249,7 +271,7 @@ def main():
         with tab_market:
             c_main, c_sidebar = st.columns([3, 1])
             with c_main:
-                st.subheader("Technical Price Analysis")
+                st.subheader("Price Action")
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
                 fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
                 fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
@@ -261,6 +283,7 @@ def main():
                 fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
                 fig.update_yaxes(title_text="Volume", row=2, col=1)
                 st.plotly_chart(fig, use_container_width=True)
+                
                 st.info("💡 **Legend:** 🔵 **Blue Line** = 50-Day Avg | 🔴 **Red Line** = 200-Day Avg. If Blue crosses above Red, it's a 'Golden Cross' (Bullish).")
 
             with c_sidebar:
@@ -278,50 +301,105 @@ def main():
                 if curr > sma_200_val: st.success("Long-Term: Bullish")
                 else: st.error("Long-Term: Bearish")
 
-        # --- TAB 2: FINANCIAL HEALTH (NEW) ---
+        # --- TAB 2: MACRO & CORRELATIONS (NEW) ---
+        with tab_macro:
+            st.subheader("🔗 Macro-Economic Correlations")
+            st.caption("How Invicta moves against the Dollar, the Mining Sector (Gold), and the Industrial Index.")
+            
+            with st.spinner("Crunching Macro Data..."):
+                macro_df = get_macro_data(period=display_period)
+            
+            if not macro_df.empty:
+                c_charts, c_stats = st.columns([3, 1])
+                
+                with c_charts:
+                    # 1. Performance Comparison Chart
+                    st.markdown("#### 🌍 Relative Performance Comparison")
+                    # Normalize all to 0 start
+                    norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
+                    
+                    fig_macro = go.Figure()
+                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['Invicta'], name='Invicta (IVT)', line=dict(width=3, color='#1f77b4')))
+                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['USD/ZAR'], name='USD/ZAR', line=dict(dash='dot', color='orange')))
+                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['JSE Industrials (Satrix)'], name='JSE Industrials', line=dict(color='gray')))
+                    fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df['Gold Price'], name='Gold', line=dict(color='#ffd700')))
+                    
+                    fig_macro.update_layout(height=400, yaxis_title="Performance (%)", hovermode="x unified")
+                    st.plotly_chart(fig_macro, use_container_width=True)
+                    
+                with c_stats:
+                    st.markdown("#### 🔢 Correlation Matrix")
+                    st.caption("1.0 = Moves perfectly together\n-1.0 = Moves exactly opposite")
+                    
+                    # Calculate Correlation
+                    corr_matrix = macro_df.pct_change().corr()
+                    
+                    # Heatmap
+                    fig_heat = px.imshow(
+                        corr_matrix, 
+                        text_auto=".2f",
+                        color_continuous_scale="RdBu_r", # Red = Negative, Blue = Positive
+                        zmin=-1, zmax=1
+                    )
+                    fig_heat.update_layout(height=300, coloraxis_showscale=False)
+                    st.plotly_chart(fig_heat, use_container_width=True)
+                    
+                # 2. Rolling Correlation (Rand Hedge Check)
+                st.divider()
+                st.markdown("#### 📉 Dynamic Relationship: Invicta vs USD/ZAR")
+                st.caption("Does Invicta act as a Rand Hedge? (If correlation is positive, Invicta rises when Rand weakens).")
+                
+                # Calculate Rolling 30-Day Correlation
+                rolling_corr = macro_df['Invicta'].rolling(window=30).corr(macro_df['USD/ZAR'])
+                
+                fig_roll = go.Figure()
+                fig_roll.add_trace(go.Scatter(x=macro_df.index, y=rolling_corr, fill='tozeroy', name='30-Day Correlation'))
+                fig_roll.add_hline(y=0, line_dash="dash", line_color="black")
+                fig_roll.update_layout(height=250, yaxis_title="Correlation", yaxis_range=[-1, 1])
+                st.plotly_chart(fig_roll, use_container_width=True)
+
+        # --- TAB 3: FINANCIAL HEALTH ---
         with tab_fin:
             st.subheader("Financial Performance & Ratio Analysis")
+            
+            # Extract date from metadata
+            most_recent_timestamp = info.get('mostRecentQuarter')
+            if most_recent_timestamp:
+                report_date = datetime.datetime.fromtimestamp(most_recent_timestamp).strftime('%d %B %Y')
+            else:
+                report_date = "Latest Annual Report"
+            st.caption(f"**Data Source:** Yahoo Finance / Morningstar | **Last Reported Quarter:** {report_date}")
+            st.divider()
+
             col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-            rev = info.get('totalRevenue')
-            ebitda = info.get('ebitda')
-            net_income = info.get('netIncomeToCommon')
-            total_cash = info.get('totalCash')
-            col_f1.metric("Total Revenue", format_large_number(rev))
-            col_f2.metric("EBITDA", format_large_number(ebitda))
-            col_f3.metric("Net Income", format_large_number(net_income))
-            col_f4.metric("Total Cash", format_large_number(total_cash))
+            col_f1.metric("Total Revenue", format_large_number(info.get('totalRevenue')))
+            col_f2.metric("EBITDA", format_large_number(info.get('ebitda')))
+            col_f3.metric("Net Income", format_large_number(info.get('netIncomeToCommon')))
+            col_f4.metric("Total Cash", format_large_number(info.get('totalCash')))
+            
             st.divider()
             c_prof, c_solv, c_chart = st.columns([1, 1, 2])
             with c_prof:
-                st.markdown("#### 💎 Profitability & Efficiency")
+                st.markdown("#### 💎 Profitability")
                 st.write(f"**Gross Margin:** {info.get('grossMargins', 0)*100:.2f}%")
                 st.write(f"**Operating Margin:** {info.get('operatingMargins', 0)*100:.2f}%")
-                st.write(f"**Return on Equity (ROE):** {info.get('returnOnEquity', 0)*100:.2f}%")
-                st.write(f"**Return on Assets (ROA):** {info.get('returnOnAssets', 0)*100:.2f}%")
+                st.write(f"**ROE:** {info.get('returnOnEquity', 0)*100:.2f}%")
             with c_solv:
-                st.markdown("#### ⚖️ Solvency & Liquidity")
+                st.markdown("#### ⚖️ Solvency")
                 st.write(f"**Current Ratio:** {info.get('currentRatio', 'N/A')}")
-                st.write(f"**Quick Ratio:** {info.get('quickRatio', 'N/A')}")
                 st.write(f"**Debt-to-Equity:** {info.get('debtToEquity', 'N/A')}")
                 st.write(f"**Total Debt:** {format_large_number(info.get('totalDebt'))}")
             with c_chart:
-                st.markdown("#### 📅 Annual Performance (Last 4 Years)")
+                st.markdown("#### 📅 Annual Performance")
                 if not financials.empty:
-                    fin_T = financials.T 
-                    fin_T = fin_T.iloc[:4] if len(fin_T) >= 4 else fin_T
-                    fin_T = fin_T.iloc[::-1]
-                    try:
-                        fig_fin = go.Figure()
-                        fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Total Revenue', marker_color='#1f77b4'))
-                        fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
-                        fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
-                        st.plotly_chart(fig_fin, use_container_width=True)
-                    except:
-                        st.warning("Historical chart unavailable.")
-                else:
-                    st.warning("Financial history unavailable.")
+                    fin_T = financials.T.iloc[:4][::-1]
+                    fig_fin = go.Figure()
+                    fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
+                    fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
+                    fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
+                    st.plotly_chart(fig_fin, use_container_width=True)
 
-        # --- TAB 3: COMPETITORS ---
+        # --- TAB 4: COMPETITORS ---
         with tab_comp:
             st.markdown("### ⚔️ Invicta vs. Hudaco vs. Barloworld")
             with st.spinner("Analyzing Peers..."):
@@ -348,12 +426,13 @@ def main():
                     styled_df.drop(columns=['1Y Return (%)'], inplace=True)
                     st.dataframe(styled_df, hide_index=True, use_container_width=True)
 
-        # --- TAB 4: SENTIMENT ---
+        # --- TAB 5: SENTIMENT ---
         with tab_sent:
             with st.spinner("AI is reading the news..."):
+                # Broaden search for competitors to avoid blanks
                 ivt_score, ivt_news = fetch_news_score("Invicta Holdings Limited", article_limit=6)
-                hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
-                baw_score, _ = fetch_news_score("Barloworld Limited", article_limit=3)
+                hdc_score, _ = fetch_news_score("Hudaco", article_limit=3)
+                baw_score, _ = fetch_news_score("Barloworld", article_limit=3)
 
             s1, s2 = st.columns([1, 2])
             with s1:
@@ -361,7 +440,7 @@ def main():
                 comp_data = {'Company': ['Invicta', 'Hudaco', 'Barloworld'], 'Score': [ivt_score, hdc_score, baw_score]}
                 df_comp = pd.DataFrame(comp_data)
                 fig_comp = go.Figure(go.Bar(x=df_comp['Score'], y=df_comp['Company'], orientation='h', marker_color=['#1f77b4', '#d62728', '#2ca02c']))
-                fig_comp.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0), xaxis_title="Score (-1 to +1)")
+                fig_comp.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0), xaxis=dict(range=[-1.0, 1.0], title="Score (-1 to +1)"))
                 st.plotly_chart(fig_comp, use_container_width=True)
                 
             with s2:
