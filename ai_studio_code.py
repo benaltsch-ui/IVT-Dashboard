@@ -46,9 +46,14 @@ except Exception as e:
 # --- HELPER FUNCTIONS ---
 def format_large_number(num):
     if num is None: return "N/A"
+    if isinstance(num, str): return num
     if num >= 1e9: return f"R {num/1e9:.2f} B"
     elif num >= 1e6: return f"R {num/1e6:.2f} M"
     else: return f"R {num:,.2f}"
+
+def calculate_change(current, previous):
+    if previous is None or previous == 0: return 0.0
+    return ((current - previous) / abs(previous)) * 100
 
 def get_final_url(url):
     try:
@@ -97,6 +102,7 @@ def get_market_data(ticker, period="1y"):
         history = stock.history(period="2y") 
         info = stock.info
         financials = stock.financials
+        quarterly_fin = stock.quarterly_financials
         balance_sheet = stock.balance_sheet
         
         # --- FIX: Convert Cents to Rands ---
@@ -106,17 +112,17 @@ def get_market_data(ticker, period="1y"):
                 cols_to_fix = ['Open', 'High', 'Low', 'Close']
                 history[cols_to_fix] = history[cols_to_fix] / 100
         
-        return history, info, financials, balance_sheet
+        return history, info, financials, quarterly_fin, balance_sheet
     except:
-        return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
 @st.cache_data(ttl=3600) 
 def get_macro_data(period="1y"):
     tickers = {
         "Invicta": "IVT.JO",
         "USD/ZAR": "ZAR=X",
-        "JSE Industrials": "STXIND.JO",
-        "Gold": "GC=F"
+        "JSE Industrials": "STXIND.JO"
+        # REMOVED GOLD (GC=F) AS REQUESTED
     }
     data = pd.DataFrame()
     for name, ticker in tickers.items():
@@ -126,7 +132,7 @@ def get_macro_data(period="1y"):
                 hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
         except:
-            continue  # <--- FIXED: Added missing except block
+            continue
     
     # Normalize Invicta in macro data too if needed
     if 'Invicta' in data.columns and data['Invicta'].mean() > 500:
@@ -239,7 +245,7 @@ def main():
     st.title("🏭 Invicta Holdings (IVT)")
     st.caption("Strategic Intelligence Dashboard")
 
-    history_full, info, financials, balance_sheet = get_market_data("IVT.JO", period="2y")
+    history_full, info, financials, quarterly_fin, balance_sheet = get_market_data("IVT.JO", period="2y")
     
     if not history_full.empty:
         # --- CALCULATIONS ---
@@ -336,7 +342,7 @@ def main():
         # --- TAB 2: MACRO ---
         with tab_macro:
             st.subheader("🔗 Macro-Economic Correlations")
-            st.caption("Comparing Invicta against Currency (USD/ZAR), Mining (Gold), and Sector benchmarks.")
+            st.caption("Comparing Invicta against Currency (USD/ZAR) and Sector benchmarks.")
             
             with st.spinner("Analyzing macro data..."):
                 macro_df = get_macro_data(period=display_period)
@@ -347,7 +353,8 @@ def main():
                     st.markdown("#### 🌍 Relative Performance Comparison")
                     norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
                     fig_macro = go.Figure()
-                    colors = {'Invicta': '#1f77b4', 'USD/ZAR': 'orange', 'JSE Industrials': 'gray', 'Gold': '#ffd700'}
+                    # Updated Colors: Removed Gold
+                    colors = {'Invicta': '#1f77b4', 'USD/ZAR': 'orange', 'JSE Industrials': 'gray'}
                     for col in norm_df.columns:
                         width = 3 if col == 'Invicta' else 1.5
                         dash = 'solid' if col == 'Invicta' else 'dot'
@@ -373,44 +380,105 @@ def main():
             else:
                 st.warning("Macro data temporarily unavailable. Please refresh.")
 
-        # --- TAB 3: FINANCIAL HEALTH ---
+        # --- TAB 3: FINANCIAL HEALTH (REVISED) ---
         with tab_fin:
-            st.subheader("Financial Performance & Ratios")
-            most_recent_timestamp = info.get('mostRecentQuarter')
-            if most_recent_timestamp:
-                report_date = datetime.datetime.fromtimestamp(most_recent_timestamp).strftime('%d %B %Y')
+            st.subheader("📊 Financial Health Comparison")
+            
+            # --- SECTION 1: ANNUAL COMPARISON ---
+            st.markdown("### 🗓️ Annual Results (Full Financial Year)")
+            if not financials.empty and financials.shape[1] >= 2:
+                # Get Most Recent Year (Col 0) and Previous Year (Col 1)
+                latest_date = financials.columns[0]
+                prev_date = financials.columns[1]
+                
+                # Extract metrics
+                metrics_list = ['Total Revenue', 'Gross Profit', 'EBITDA', 'Net Income', 'Basic EPS']
+                
+                fin_data = []
+                for m in metrics_list:
+                    try:
+                        val_curr = financials.loc[m, latest_date] if m in financials.index else 0
+                        val_prev = financials.loc[m, prev_date] if m in financials.index else 0
+                        change = calculate_change(val_curr, val_prev)
+                        
+                        # Formatting
+                        fin_data.append({
+                            "Metric": m,
+                            f"{latest_date.strftime('%Y') } (Latest)": format_large_number(val_curr),
+                            f"{prev_date.strftime('%Y')} (Prior)": format_large_number(val_prev),
+                            "Change (%)": f"{change:+.2f}%"
+                        })
+                    except:
+                        continue
+                
+                df_annual_comp = pd.DataFrame(fin_data)
+                st.dataframe(df_annual_comp, use_container_width=True, hide_index=True)
             else:
-                report_date = "Latest Annual Report"
-            st.caption(f"**Data Source:** Yahoo Finance / Morningstar | **Last Reported Quarter:** {report_date}")
+                st.warning("Insufficient Annual Data available for comparison.")
+
             st.divider()
 
-            col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-            col_f1.metric("Total Revenue", format_large_number(info.get('totalRevenue')))
-            col_f2.metric("EBITDA", format_large_number(info.get('ebitda')))
-            col_f3.metric("Net Income", format_large_number(info.get('netIncomeToCommon')))
-            col_f4.metric("Total Cash", format_large_number(info.get('totalCash')))
+            # --- SECTION 2: INTERIM / RECENT COMPARISON ---
+            st.markdown("### ⏱️ Year to Date / Recent Trend (Interim)")
             
-            st.divider()
-            c_prof, c_solv, c_chart = st.columns([1, 1, 2])
-            with c_prof:
-                st.markdown("#### 💎 Profitability")
-                st.write(f"**Gross Margin:** {info.get('grossMargins', 0)*100:.2f}%")
-                st.write(f"**Operating Margin:** {info.get('operatingMargins', 0)*100:.2f}%")
-                st.write(f"**ROE:** {info.get('returnOnEquity', 0)*100:.2f}%")
-            with c_solv:
-                st.markdown("#### ⚖️ Solvency")
-                st.write(f"**Current Ratio:** {info.get('currentRatio', 'N/A')}")
-                st.write(f"**Debt-to-Equity:** {info.get('debtToEquity', 'N/A')}")
-                st.write(f"**Total Debt:** {format_large_number(info.get('totalDebt'))}")
-            with c_chart:
-                st.markdown("#### 📅 Annual Performance")
-                if not financials.empty:
-                    fin_T = financials.T.iloc[:4][::-1]
-                    fig_fin = go.Figure()
-                    fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
+            has_quarterly = not quarterly_fin.empty and quarterly_fin.shape[1] >= 2
+            
+            if has_quarterly:
+                st.caption(f"Comparing most recent reported period vs prior period.")
+                q_latest_date = quarterly_fin.columns[0]
+                q_prev_date = quarterly_fin.columns[1] # Comparing to sequential previous
+                
+                q_metrics_list = ['Total Revenue', 'Net Income', 'Operating Income']
+                q_data = []
+                
+                for m in q_metrics_list:
+                    try:
+                        q_curr = quarterly_fin.loc[m, q_latest_date] if m in quarterly_fin.index else 0
+                        q_prev = quarterly_fin.loc[m, q_prev_date] if m in quarterly_fin.index else 0
+                        q_change = calculate_change(q_curr, q_prev)
+                        
+                        q_data.append({
+                            "Metric": m,
+                            f"{q_latest_date.strftime('%b %Y')}": format_large_number(q_curr),
+                            f"{q_prev_date.strftime('%b %Y')}": format_large_number(q_prev),
+                            "Change (%)": f"{q_change:+.2f}%"
+                        })
+                    except:
+                        continue
+                
+                df_q_comp = pd.DataFrame(q_data)
+                st.dataframe(df_q_comp, use_container_width=True, hide_index=True)
+            
+            else:
+                # FALLBACK: If quarterly data is missing (common for JSE stocks on Yahoo), show TTM vs Annual
+                st.info("Detailed Interim/Quarterly data not available via API. Showing TTM vs Last Annual.")
+                ttm_data = []
+                
+                # Revenue
+                rev_ttm = info.get('totalRevenue', 0)
+                rev_last = financials.iloc[0]['Total Revenue'] if not financials.empty else 0
+                ttm_data.append({"Metric": "Revenue", "TTM (Current)": format_large_number(rev_ttm), "Last Annual": format_large_number(rev_last)})
+                
+                # EBITDA
+                ebitda_ttm = info.get('ebitda', 0)
+                ebitda_last = financials.iloc[0]['EBITDA'] if (not financials.empty and 'EBITDA' in financials.index) else 0
+                ttm_data.append({"Metric": "EBITDA", "TTM (Current)": format_large_number(ebitda_ttm), "Last Annual": format_large_number(ebitda_last)})
+
+                st.dataframe(pd.DataFrame(ttm_data), use_container_width=True, hide_index=True)
+
+            # --- VISUALIZATION ---
+            st.markdown("#### 📉 Performance Visualization")
+            if not financials.empty:
+                fin_T = financials.T.iloc[:4][::-1] # Last 4 years reversed
+                fig_fin = go.Figure()
+                fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
+                
+                if 'Net Income' in fin_T.columns:
                     fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
-                    fig_fin.update_layout(barmode='group', height=300, margin=dict(l=0, r=0, t=0, b=0))
-                    st.plotly_chart(fig_fin, use_container_width=True)
+                    
+                fig_fin.update_layout(barmode='group', height=350, title="Annual Revenue vs Net Income Trend")
+                st.plotly_chart(fig_fin, use_container_width=True)
+
 
         # --- TAB 4: COMPETITORS ---
         with tab_comp:
