@@ -27,18 +27,12 @@ def load_sentiment_resources():
     
     # Financial Dictionary (Customized)
     financial_lexicon = {
-        # Standard Market Terms
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
         'dividend': 2.0, 'earnings': 1.5, 'profit': 2.0, 'growth': 2.0,
         'resilient': 2.0, 'strong': 2.0, 'up': 1.0, 'down': -1.0,
         'acquisition': 1.5, 'buyback': 1.5, 'challenging': -1.0, 'headwinds': -1.5,
-        
-        # FIXES FOR CONTEXT (Based on user feedback)
-        'ghost': 0.0,   # Ignore "Finance Ghost" writer name
-        'busy': 1.0,    # Busy usually means active/good in business
-        'mixed': 0.0,   # Mixed results = Neutral
-        'flat': -0.5    # Flat earnings = Slight negative
+        'ghost': 0.0, 'busy': 1.0, 'mixed': 0.0, 'flat': -0.5
     }
     sia.lexicon.update(financial_lexicon)
     return sia
@@ -104,6 +98,15 @@ def get_market_data(ticker, period="1y"):
         info = stock.info
         financials = stock.financials
         balance_sheet = stock.balance_sheet
+        
+        # --- FIX: Convert Cents to Rands ---
+        # JSE stocks often return price in Cents (e.g., 3000) but financials in Rands.
+        if not history.empty:
+            current_price = history['Close'].iloc[-1]
+            if current_price > 500: # Threshold to detect if data is in Cents (ZAc)
+                cols_to_fix = ['Open', 'High', 'Low', 'Close']
+                history[cols_to_fix] = history[cols_to_fix] / 100
+        
         return history, info, financials, balance_sheet
     except:
         return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame()
@@ -121,11 +124,13 @@ def get_macro_data(period="1y"):
         try:
             hist = yf.Ticker(ticker).history(period=period)
             if not hist.empty:
-                # Timezone alignment fix
                 hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
-        except:
-            continue 
+    
+    # Normalize Invicta in macro data too if needed (simple check)
+    if 'Invicta' in data.columns and data['Invicta'].mean() > 500:
+        data['Invicta'] = data['Invicta'] / 100
+        
     return data.ffill().bfill()
 
 @st.cache_data(ttl=3600) 
@@ -138,8 +143,13 @@ def get_competitor_financials():
         try:
             stock = yf.Ticker(sym)
             hist = stock.history(period="1y")
+            info = stock.info
             
             if not hist.empty:
+                # Fix ZAc to ZAR for competitors too
+                if hist['Close'].iloc[-1] > 500:
+                    hist['Close'] = hist['Close'] / 100
+                
                 start_price = hist['Close'].iloc[0]
                 hist['Growth'] = ((hist['Close'] - start_price) / start_price) * 100
                 history_df[name] = hist['Growth']
@@ -147,16 +157,21 @@ def get_competitor_financials():
             else:
                 current_price = 0
 
-            info = stock.info
             pe = info.get('trailingPE', 0)
-            div_yield = (info.get('dividendYield', 0) or 0) * 100
             m_cap = (info.get('marketCap', 0) or 0) / 1e9
             
+            # Competitor Dividend Fix
+            div_rate = info.get('dividendRate', 0)
+            if div_rate and current_price > 0:
+                calc_yield = (div_rate / current_price) * 100
+            else:
+                calc_yield = (info.get('dividendYield', 0) or 0) * 100
+
             metrics.append({
                 "Company": name,
                 "Price": current_price,
                 "P/E Ratio": pe,
-                "Div Yield (%)": div_yield,
+                "Div Yield (%)": calc_yield,
                 "Market Cap (B)": m_cap,
                 "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
             })
@@ -244,22 +259,45 @@ def main():
         else: slice_days = 730
         history = history_full.tail(slice_days).copy()
         
-        # --- KEY METRICS EXTRACTION ---
+        # --- METRICS CALCULATION ---
         curr = history['Close'].iloc[-1]
-        pct = ((curr - history['Close'].iloc[-2]) / history['Close'].iloc[-2]) * 100
+        prev = history['Close'].iloc[-2]
+        pct = ((curr - prev) / prev) * 100
         current_rsi = history['RSI'].iloc[-1]
         
         eps = info.get('trailingEps', 0)
         pe_ratio = info.get('trailingPE', 0)
-        div_yield = info.get('dividendYield', 0)
         
+        # --- DIVIDEND YIELD FIX ---
+        # Formula: (Annual Dividend / Share Price) * 100
+        # Data Cleaning: 
+        # 1. info['dividendRate'] is usually in Rands (e.g. 1.05)
+        # 2. curr is now in Rands (because we fixed it in get_market_data)
+        
+        div_rate = info.get('dividendRate', None)
+        
+        if div_rate is not None and curr > 0:
+            # We have the actual Rand value of dividend (e.g. R1.05)
+            calculated_yield = (div_rate / curr) * 100
+        else:
+            # Fallback: Sometimes dividendRate is missing, use dividendYield from Yahoo
+            # Yahoo yield is usually a decimal (0.03). If it looks like integer (3.0), leave it.
+            raw_yield = info.get('dividendYield', 0) or 0
+            if raw_yield > 0.5: # If 3.11, assume percent
+                calculated_yield = raw_yield
+            else: # If 0.0311, convert to percent
+                calculated_yield = raw_yield * 100
+
         # --- TOP LEVEL METRICS ROW ---
         m1, m2, m3, m4, m5 = st.columns(5)
         
         m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
         m2.metric("EPS (TTM)", f"R {eps:.2f}" if eps else "N/A")
         m3.metric("P/E Ratio", f"{pe_ratio:.2f}" if pe_ratio else "N/A")
-        m4.metric("Dividend Yield", f"{div_yield*100:.2f}%" if div_yield else "N/A")
+        
+        # Corrected Yield Display
+        m4.metric("Dividend Yield", f"{calculated_yield:.2f}%")
+        
         m5.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
         # --- TABS ---
@@ -292,7 +330,7 @@ def main():
             with c_sidebar:
                 st.subheader("Trading Stats")
                 
-                # RSI Metric moved here
+                # RSI Metric
                 st.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
                 st.markdown("---")
                 
