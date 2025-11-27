@@ -25,7 +25,6 @@ def load_sentiment_resources():
     
     sia = SentimentIntensityAnalyzer()
     
-    # Financial Dictionary
     financial_lexicon = {
         'shoot': 2.0, 'surged': 3.0, 'jumped': 2.5, 'climbed': 2.0, 'soared': 3.0, 'green': 1.5,
         'plunged': -3.0, 'tumbled': -2.5, 'slumped': -2.5, 'red': -1.5,
@@ -67,7 +66,6 @@ def safe_get_financial_value(df, metric_name, col_index=0):
     """Safely retrieves a value from the financials dataframe without crashing."""
     try:
         if df.empty: return 0
-        # Check if the metric exists in the index (rows)
         if metric_name in df.index:
             return df.loc[metric_name].iloc[col_index]
         return 0
@@ -263,17 +261,28 @@ def main():
     history_full, info, financials, quarterly_fin, balance_sheet = get_market_data("IVT.JO", period="2y")
     
     if not history_full.empty:
-        # --- CALCULATIONS ---
-        # Technicals
+        # --- TECHNICAL CALCULATIONS ---
+        # SMAs
         history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
         history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
+        
+        # RSI
         delta = history_full['Close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         history_full['RSI'] = 100 - (100 / (1 + rs))
+        
+        # MACD (New)
+        history_full['EMA_12'] = history_full['Close'].ewm(span=12, adjust=False).mean()
+        history_full['EMA_26'] = history_full['Close'].ewm(span=26, adjust=False).mean()
+        history_full['MACD'] = history_full['EMA_12'] - history_full['EMA_26']
+        history_full['Signal_Line'] = history_full['MACD'].ewm(span=9, adjust=False).mean()
+
+        # Volume
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
+        # Slicing for Chart
         if display_period == "3mo": slice_days = 90
         elif display_period == "6mo": slice_days = 180
         elif display_period == "1y": slice_days = 365
@@ -285,6 +294,10 @@ def main():
         prev = history['Close'].iloc[-2]
         pct = ((curr - prev) / prev) * 100
         current_rsi = history['RSI'].iloc[-1]
+        sma_50_val = history['SMA_50'].iloc[-1]
+        sma_200_val = history['SMA_200'].iloc[-1]
+        macd_val = history['MACD'].iloc[-1]
+        signal_val = history['Signal_Line'].iloc[-1]
         
         eps = info.get('trailingEps', 0)
         pe_ratio = info.get('trailingPE', 0)
@@ -326,20 +339,52 @@ def main():
                 fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
                 fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
                 st.plotly_chart(fig, use_container_width=True)
-                st.info("💡 **Chart Guide:** 🔵 **50-Day SMA** (Short Trend) | 🔴 **200-Day SMA** (Long Trend).")
 
             with c_sidebar:
-                st.subheader("Trading Stats")
-                st.metric("RSI (14-Day)", f"{current_rsi:.1f}", "Overbought" if current_rsi > 70 else "Oversold" if current_rsi < 30 else "Neutral")
+                st.subheader("💡 AI Technical Verdict")
+                
+                # Trend Logic
+                if curr > sma_50_val and curr > sma_200_val:
+                    trend_msg = "Bullish (Above SMA 50 & 200)"
+                    trend_icon = "🟢"
+                elif curr < sma_50_val and curr < sma_200_val:
+                    trend_msg = "Bearish (Below SMA 50 & 200)"
+                    trend_icon = "🔴"
+                else:
+                    trend_msg = "Neutral / Consolidation"
+                    trend_icon = "⚪"
+                
+                # Momentum Logic
+                if current_rsi > 70:
+                    mom_msg = "Overbought (Risk of Pullback)"
+                    mom_icon = "⚠️"
+                elif current_rsi < 30:
+                    mom_msg = "Oversold (Bounce Possible)"
+                    mom_icon = "♻️"
+                else:
+                    mom_msg = "Stable Momentum"
+                    mom_icon = "✅"
+                    
+                # MACD Logic
+                if macd_val > signal_val:
+                    macd_msg = "Positive Divergence"
+                else:
+                    macd_msg = "Negative Divergence"
+
+                st.markdown(f"**Trend:** {trend_icon} {trend_msg}")
+                st.markdown(f"**Momentum:** {mom_icon} {mom_msg}")
+                st.markdown(f"**MACD:** {macd_msg}")
+                
                 st.markdown("---")
+                st.metric("RSI (14-Day)", f"{current_rsi:.1f}")
+                st.metric("MACD Level", f"{macd_val:.2f}")
+                st.markdown("---")
+                
                 high_52 = history_full['High'].tail(252).max()
                 low_52 = history_full['Low'].tail(252).min()
                 st.metric("52-Week High", f"R {high_52:.2f}")
                 st.metric("52-Week Low", f"R {low_52:.2f}")
-                st.markdown("---")
-                volatility = history['Close'].pct_change().std() * (252**0.5) * 100
-                st.metric("Annualized Volatility", f"{volatility:.1f}%")
-                
+
         with tab_macro:
             st.subheader("🔗 Macro-Economic Correlations")
             with st.spinner("Analyzing macro data..."):
@@ -363,7 +408,6 @@ def main():
                     corr_matrix = macro_df.pct_change().corr()['Invicta'].drop('Invicta')
                     st.dataframe(corr_matrix, use_container_width=True)
 
-        # --- TAB 3: FINANCIAL HEALTH (FIXED) ---
         with tab_fin:
             st.subheader("📊 Financial Health Comparison")
             
@@ -419,31 +463,38 @@ def main():
                 st.dataframe(pd.DataFrame(q_data), use_container_width=True, hide_index=True)
             
             else:
-                # FALLBACK MODE (Fixed KeyError)
                 st.info("Detailed Interim data unavailable via API. Showing TTM vs Last Annual.")
                 ttm_data = []
                 
-                # Revenue
                 rev_ttm = info.get('totalRevenue', 0)
                 rev_last = safe_get_financial_value(financials, 'Total Revenue', 0)
                 ttm_data.append({"Metric": "Revenue", "TTM (Current)": format_large_number(rev_ttm), "Last Annual": format_large_number(rev_last)})
                 
-                # EBITDA
                 ebitda_ttm = info.get('ebitda', 0)
                 ebitda_last = safe_get_financial_value(financials, 'EBITDA', 0)
                 ttm_data.append({"Metric": "EBITDA", "TTM (Current)": format_large_number(ebitda_ttm), "Last Annual": format_large_number(ebitda_last)})
 
                 st.dataframe(pd.DataFrame(ttm_data), use_container_width=True, hide_index=True)
 
-            # Chart
+            # --- CHART WITH FIXED DATE FORMATTING ---
             if not financials.empty:
                 fin_T = financials.T.iloc[:4][::-1]
+                
+                # --- DATE FORMATTING LOGIC ---
+                # Yahoo Finance usually provides column names as Timestamps.
+                # We convert these to strings like "Mar 2023", "Mar 2024" to ensure the Year End is clear.
+                try:
+                    formatted_dates = [d.strftime('%b %Y') if isinstance(d, pd.Timestamp) else str(d) for d in fin_T.index]
+                except:
+                    formatted_dates = fin_T.index.astype(str)
+
                 fig_fin = go.Figure()
                 if 'Total Revenue' in fin_T.columns:
-                    fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
+                    fig_fin.add_trace(go.Bar(x=formatted_dates, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
                 if 'Net Income' in fin_T.columns:
-                    fig_fin.add_trace(go.Bar(x=fin_T.index, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
-                fig_fin.update_layout(height=350, title="Annual Trend")
+                    fig_fin.add_trace(go.Bar(x=formatted_dates, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
+                
+                fig_fin.update_layout(height=350, title="Annual Trend (Year End March)")
                 st.plotly_chart(fig_fin, use_container_width=True)
 
         with tab_comp:
