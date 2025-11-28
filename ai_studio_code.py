@@ -156,7 +156,14 @@ def get_macro_data(period="1y"):
 
 @st.cache_data(ttl=3600) 
 def get_competitor_financials():
-    tickers = {"Invicta (IVT)": "IVT.JO", "Hudaco (HDC)": "HDC.JO", "Barloworld (BAW)": "BAW.JO"}
+    tickers = {
+        "Invicta (IVT)": "IVT.JO",
+        "Hudaco (HDC)": "HDC.JO",
+        "Barloworld (BAW)": "BAW.JO",
+        "Bell Equipment (BEL)": "BEL.JO",
+        "Master Drilling (MDI)": "MDI.JO",
+        "enX Group (ENX)": "ENX.JO"
+    }
     metrics = []
     history_df = pd.DataFrame()
     
@@ -517,8 +524,6 @@ def main():
                         })
                 st.dataframe(pd.DataFrame(q_data), use_container_width=True, hide_index=True)
             
-            # Note: Removed the "else" fallback block entirely as requested.
-
             st.divider()
             
             # 3. RATIO ANALYSIS (NEW)
@@ -601,10 +606,23 @@ def main():
                 col_c1, col_c2 = st.columns([3, 2])
                 with col_c1:
                     fig_rel = go.Figure()
-                    colors = {"Invicta (IVT)": "#1f77b4", "Hudaco (HDC)": "#d62728", "Barloworld (BAW)": "#2ca02c"}
+                    colors = {
+                        "Invicta (IVT)": "#1f77b4",
+                        "Hudaco (HDC)": "#d62728",
+                        "Barloworld (BAW)": "#2ca02c",
+                        "Bell Equipment (BEL)": "#9467bd",
+                        "Master Drilling (MDI)": "#8c564b",
+                        "enX Group (ENX)": "#7f7f7f"
+                    }
                     for col in comp_history.columns:
                         width = 4 if "Invicta" in col else 2
-                        fig_rel.add_trace(go.Scatter(x=comp_history.index, y=comp_history[col], mode='lines', name=col, line=dict(width=width, color=colors.get(col, "gray"))))
+                        fig_rel.add_trace(go.Scatter(
+                            x=comp_history.index,
+                            y=comp_history[col],
+                            mode='lines',
+                            name=col,
+                            line=dict(width=width, color=colors.get(col, "gray"))
+                        ))
                     fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0), yaxis_title="Growth %")
                     st.plotly_chart(fig_rel, use_container_width=True)
                 with col_c2:
@@ -613,23 +631,100 @@ def main():
                     styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
                     styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
                     styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
-                    st.dataframe(styled_df[['Company', 'Price', 'P/E Ratio', 'Div Yield (%)', 'Market Cap (B)']], hide_index=True, use_container_width=True)
+                    st.dataframe(
+                        styled_df[['Company', 'Price', 'P/E Ratio', 'Div Yield (%)', 'Market Cap (B)']],
+                        hide_index=True,
+                        use_container_width=True
+                    )
 
         with tab_sent:
             with st.spinner("AI is reading the news..."):
                 ivt_score, ivt_news = fetch_news_score("Invicta Holdings", article_limit=6)
                 hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
                 baw_score, _ = fetch_news_score("Barloworld", article_limit=3)
+                bell_score, _ = fetch_news_score("Bell Equipment", article_limit=3)
+                mdi_score, _ = fetch_news_score("Master Drilling", article_limit=3)
+                enx_score, _ = fetch_news_score("enX Group", article_limit=3)
 
-            s1, s2 = st.columns([1, 2])
+            # --- IVT Sentiment Trend Over Time ---
+            if ivt_news:
+                trend_df = pd.DataFrame(ivt_news)
+                trend_df['DateParsed'] = pd.to_datetime(
+                    trend_df['date'],
+                    format="%d %b %Y",
+                    errors='coerce'
+                )
+                trend_df = trend_df.dropna(subset=['DateParsed'])
+                if not trend_df.empty:
+                    daily = (
+                        trend_df.groupby('DateParsed')['Score']
+                        .mean()
+                        .reset_index()
+                        .sort_values('DateParsed')
+                    )
+                else:
+                    daily = pd.DataFrame()
+            else:
+                daily = pd.DataFrame()
+
+            s1, s2 = st.columns([1.2, 1.8])
+
             with s1:
+                # IVT Sentiment Trend
+                st.markdown("#### IVT Sentiment Trend")
+                if not daily.empty:
+                    fig_trend = go.Figure(
+                        go.Scatter(
+                            x=daily['DateParsed'],
+                            y=daily['Score'],
+                            mode='lines+markers',
+                            name='IVT Sentiment'
+                        )
+                    )
+                    fig_trend.update_layout(
+                        height=220,
+                        margin=dict(l=0, r=0, t=10, b=0),
+                        yaxis=dict(title="Score (-1 to +1)", range=[-1, 1])
+                    )
+                    st.plotly_chart(fig_trend, use_container_width=True)
+                else:
+                    st.caption("Not enough dated news to plot a sentiment trend yet.")
+
+                # Sentiment Battle
                 st.markdown("#### Sentiment Battle")
-                comp_data = {'Company': ['Invicta', 'Hudaco', 'Barloworld'], 'Score': [ivt_score, hdc_score, baw_score]}
+                comp_data = {
+                    'Company': [
+                        'Invicta',
+                        'Hudaco',
+                        'Barloworld',
+                        'Bell Equipment',
+                        'Master Drilling',
+                        'enX Group'
+                    ],
+                    'Score': [
+                        ivt_score,
+                        hdc_score,
+                        baw_score,
+                        bell_score,
+                        mdi_score,
+                        enx_score
+                    ]
+                }
                 df_comp = pd.DataFrame(comp_data)
-                fig_comp = go.Figure(go.Bar(x=df_comp['Score'], y=df_comp['Company'], orientation='h', marker_color=['#1f77b4', '#d62728', '#2ca02c']))
-                fig_comp.update_layout(height=250, margin=dict(l=0, r=0, t=0, b=0), xaxis=dict(range=[-1.0, 1.0], title="Score (-1 to +1)"))
+                fig_comp = go.Figure(
+                    go.Bar(
+                        x=df_comp['Score'],
+                        y=df_comp['Company'],
+                        orientation='h'
+                    )
+                )
+                fig_comp.update_layout(
+                    height=260,
+                    margin=dict(l=0, r=0, t=10, b=0),
+                    xaxis=dict(range=[-1.0, 1.0], title="Score (-1 to +1)")
+                )
                 st.plotly_chart(fig_comp, use_container_width=True)
-                
+
             with s2:
                 st.markdown("#### Invicta News Feed")
                 if ivt_news:
@@ -643,6 +738,8 @@ def main():
                             with c_i:
                                 st.progress((item['Score'] + 1) / 2)
                                 st.caption(f"Impact: {item['Score']:.2f}")
+                else:
+                    st.caption("No recent Invicta news articles found.")
 
 if __name__ == "__main__":
     main()
