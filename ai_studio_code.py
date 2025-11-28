@@ -1,9 +1,8 @@
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 import nltk
 from nltk.sentiment.vader import SentimentIntensityAnalyzer
@@ -13,7 +12,11 @@ import trafilatura
 from email.utils import parsedate_to_datetime
 
 # --- CONFIGURATION ---
-st.set_page_config(page_title="Invicta Holdings Pro Dashboard", layout="wide", page_icon="🏭")
+st.set_page_config(
+    page_title="Invicta Holdings Pro Dashboard",
+    layout="wide",
+    page_icon="🏭"
+)
 
 # --- CACHING & RESOURCES ---
 @st.cache_resource
@@ -252,58 +255,74 @@ def get_competitor_financials():
 
 @st.cache_data(ttl=3600)
 def fetch_news_score(query, article_limit=5):
-    encoded = query.replace(" ", "%20")
-    rss_url = (
-        f"https://news.google.com/rss/search?q={encoded}+South+Africa"
-        f"&hl=en-ZA&gl=ZA&ceid=ZA:en"
-    )
-    feed = feedparser.parse(rss_url)
-    
-    if not feed.entries:
-        return 0.0, []
-    
+    """
+    Fetch sentiment-scored news. For 'Invicta Holdings', use multiple search
+    variants to pull more coverage.
+    """
     news_items = []
-    limit = min(len(feed.entries), article_limit)
-    
-    for entry in feed.entries[:limit]:
-        real_url = get_final_url(entry.link)
-        full_text = get_article_content(real_url)
-        
-        if full_text:
-            score, label, icon, expl = analyze_content(
-                full_text, "Full Text (article body)"
-            )
-            snippet = full_text[:600] + "..."
-            method = "✅ Full Text"
-        else:
-            raw_desc = entry.get('description', entry.title)
-            import re
-            clean_desc = re.sub('<.*?>', '', raw_desc)
-            score, label, icon, expl = analyze_content(
-                clean_desc, "Snippet (headline/description)"
-            )
-            snippet = clean_desc
-            method = "⚠️ Snippet"
-            
-        try:
-            dt = parsedate_to_datetime(entry.published)
-            clean_date = dt.strftime("%d %b %Y")
-        except Exception:
-            clean_date = "Recent"
+    seen = set()
 
-        news_items.append({
-            "title": entry.title,
-            "link": real_url,
-            "source": entry.source.title if hasattr(entry, 'source') else "News",
-            "date": clean_date,
-            "snippet": snippet,
-            "Sentiment": label,
-            "Icon": icon,
-            "Score": score,
-            "Explanation": expl,
-            "Method": method
-        })
-        
+    base_queries = [query]
+    if "invicta holdings" in query.lower():
+        base_queries.extend([f"{query} JSE", f"{query} IVT", "IVT.JO"])
+
+    for q in base_queries:
+        encoded = q.replace(" ", "%20")
+        rss_url = (
+            f"https://news.google.com/rss/search?q={encoded}"
+            f"&hl=en-ZA&gl=ZA&ceid=ZA:en"
+        )
+        feed = feedparser.parse(rss_url)
+        if not feed.entries:
+            continue
+
+        for entry in feed.entries:
+            if len(news_items) >= article_limit:
+                break
+
+            key = (entry.title, entry.get("published", ""))
+            if key in seen:
+                continue
+            seen.add(key)
+
+            real_url = get_final_url(entry.link)
+            full_text = get_article_content(real_url)
+            
+            if full_text:
+                score, label, icon, expl = analyze_content(
+                    full_text, "Full Text (article body)"
+                )
+                snippet = full_text[:600] + "..."
+                method = "✅ Full Text"
+            else:
+                raw_desc = entry.get('description', entry.title)
+                import re
+                clean_desc = re.sub('<.*?>', '', raw_desc)
+                score, label, icon, expl = analyze_content(
+                    clean_desc, "Snippet (headline/description)"
+                )
+                snippet = clean_desc
+                method = "⚠️ Snippet"
+                
+            try:
+                dt = parsedate_to_datetime(entry.published)
+                clean_date = dt.strftime("%d %b %Y")
+            except Exception:
+                clean_date = "Recent"
+
+            news_items.append({
+                "title": entry.title,
+                "link": real_url,
+                "source": entry.source.title if hasattr(entry, 'source') else "News",
+                "date": clean_date,
+                "snippet": snippet,
+                "Sentiment": label,
+                "Icon": icon,
+                "Score": score,
+                "Explanation": expl,
+                "Method": method
+            })
+
     avg_score = pd.DataFrame(news_items)['Score'].mean() if news_items else 0.0
     return avg_score, news_items
 
@@ -339,6 +358,7 @@ def main():
 
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
+        # Slice period for display
         if display_period == "3mo":
             slice_days = 90
         elif display_period == "6mo":
@@ -348,7 +368,27 @@ def main():
         else:
             slice_days = 730
         history = history_full.tail(slice_days).copy()
-        
+
+        # --- VWAP & SPIKES ---
+        # Approx daily VWAP using typical price
+        typical_price = (history['High'] + history['Low'] + history['Close']) / 3
+        cum_pv = (typical_price * history['Volume']).cumsum()
+        cum_vol = history['Volume'].cumsum().replace(0, np.nan)
+        history['VWAP'] = cum_pv / cum_vol
+
+        # Daily % change
+        history['Pct_Change'] = history['Close'].pct_change() * 100
+
+        PRICE_SPIKE_THRESHOLD = 3.0  # percent
+        VOLUME_SPIKE_MULTIPLIER = 1.5
+
+        history['Price_Spike_Up'] = history['Pct_Change'] >= PRICE_SPIKE_THRESHOLD
+        history['Price_Spike_Down'] = history['Pct_Change'] <= -PRICE_SPIKE_THRESHOLD
+        history['Volume_Spike'] = history['Volume'] > (
+            history['Vol_Avg'] * VOLUME_SPIKE_MULTIPLIER
+        )
+
+        # Latest values
         curr = history['Close'].iloc[-1]
         prev = history['Close'].iloc[-2]
         pct = ((curr - prev) / prev) * 100
@@ -357,7 +397,25 @@ def main():
         sma_200_val = history['SMA_200'].iloc[-1]
         macd_val = history['MACD'].iloc[-1]
         signal_val = history['Signal_Line'].iloc[-1]
-        
+
+        latest_row = history.iloc[-1]
+
+        # --- SIMPLE IN-APP ALERTS (SESSION ONLY) ---
+        # Note: this does not send emails/notifications; it just flags in the UI.
+        if latest_row['Price_Spike_Up']:
+            st.sidebar.success(
+                f"📈 Price spike up: {latest_row['Pct_Change']:.2f}% move today."
+            )
+        elif latest_row['Price_Spike_Down']:
+            st.sidebar.error(
+                f"📉 Price spike down: {latest_row['Pct_Change']:.2f}% move today."
+            )
+
+        if latest_row['Volume_Spike']:
+            st.sidebar.warning(
+                "🔊 Unusual trading volume detected vs 30-day average."
+            )
+
         eps = info.get('trailingEps', 0)
         pe_ratio = info.get('trailingPE', 0)
         
@@ -391,12 +449,13 @@ def main():
         with tab_market:
             c_main, c_sidebar = st.columns([3, 1])
             with c_main:
-                st.subheader("Price & Volume Analysis")
+                st.subheader("Price, VWAP & Volume Analysis")
                 fig = make_subplots(
                     rows=2, cols=1, shared_xaxes=True,
                     vertical_spacing=0.1, row_heights=[0.7, 0.3]
                 )
                 
+                # Candlestick
                 fig.add_trace(go.Candlestick(
                     x=history.index,
                     open=history['Open'],
@@ -405,6 +464,8 @@ def main():
                     close=history['Close'],
                     name="Price"
                 ), row=1, col=1)
+
+                # SMAs
                 fig.add_trace(go.Scatter(
                     x=history.index,
                     y=history['SMA_50'],
@@ -417,7 +478,42 @@ def main():
                     line=dict(color='firebrick', width=1.5),
                     name="200-Day SMA"
                 ), row=1, col=1)
+
+                # VWAP line
+                fig.add_trace(go.Scatter(
+                    x=history.index,
+                    y=history['VWAP'],
+                    line=dict(color='orange', width=1.5, dash='dash'),
+                    name="VWAP"
+                ), row=1, col=1)
+
+                # Price spikes
+                spike_up = history[history['Price_Spike_Up']]
+                spike_down = history[history['Price_Spike_Down']]
+
+                if not spike_up.empty:
+                    fig.add_trace(go.Scatter(
+                        x=spike_up.index,
+                        y=spike_up['Close'],
+                        mode='markers',
+                        marker=dict(color='lime', size=10, symbol='triangle-up'),
+                        name="Price Spike Up",
+                        hovertemplate="Date: %{x|%d %b %Y}<br>Close: R %{y:.2f}<br>Change: %{customdata:.2f}%<extra></extra>",
+                        customdata=spike_up['Pct_Change']
+                    ), row=1, col=1)
+
+                if not spike_down.empty:
+                    fig.add_trace(go.Scatter(
+                        x=spike_down.index,
+                        y=spike_down['Close'],
+                        mode='markers',
+                        marker=dict(color='red', size=10, symbol='triangle-down'),
+                        name="Price Spike Down",
+                        hovertemplate="Date: %{x|%d %b %Y}<br>Close: R %{y:.2f}<br>Change: %{customdata:.2f}%<extra></extra>",
+                        customdata=spike_down['Pct_Change']
+                    ), row=1, col=1)
                 
+                # Volume bars
                 colors = [
                     '#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853'
                     for _, row in history.iterrows()
@@ -431,19 +527,32 @@ def main():
                                   '<b>Volume</b>: %{y:,} shares<extra></extra>'
                 ), row=2, col=1)
                 
+                # Avg volume
                 fig.add_trace(go.Scatter(
                     x=history.index,
                     y=history['Vol_Avg'],
                     mode='lines',
-                    name="Avg Vol",
+                    name="Avg Vol (30d)",
                     line=dict(color='orange', dash='dot')
                 ), row=2, col=1)
+
+                # Volume spikes markers
+                vol_spike = history[history['Volume_Spike']]
+                if not vol_spike.empty:
+                    fig.add_trace(go.Scatter(
+                        x=vol_spike.index,
+                        y=vol_spike['Volume'],
+                        mode='markers',
+                        marker=dict(color='gold', size=10, symbol='diamond'),
+                        name="Volume Spike",
+                        hovertemplate="Date: %{x|%d %b %Y}<br>Volume: %{y:,}<extra></extra>"
+                    ), row=2, col=1)
                 
                 fig.update_layout(
                     height=600,
                     xaxis_rangeslider_visible=False,
                     showlegend=True,
-                    legend=dict(orientation="h", y=1.02, x=0)
+                    legend=dict(orientation="h", y=1.04, x=0)
                 )
                 fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
                 fig.update_yaxes(
@@ -457,7 +566,7 @@ def main():
                 l1.info("**SMA (Trend)**\n\nPrice > Lines = 🟢 Bullish\n\nPrice < Lines = 🔴 Bearish")
                 l2.info("**RSI (Momentum)**\n\n> 70 = High/Sell ⚠️\n\n< 30 = Low/Buy 🟢")
                 l3.info("**MACD (Signal)**\n\nLine > Signal = 🟢 Positive\n\nLine < Signal = 🔴 Negative")
-                l4.info("**Volume**\n\nGreen = Buying Pressure\n\nRed = Selling Pressure")
+                l4.info("**Volume**\n\nGold diamond = Volume Spike\n\nOrange line = 30-day avg")
 
             with c_sidebar:
                 st.subheader("💡 AI Technical Verdict")
@@ -831,23 +940,24 @@ def main():
         # --- AI Sentiment ---
         with tab_sent:
             with st.spinner("AI is reading the news..."):
+                # More Invicta news: higher article limit
                 ivt_score, ivt_news = fetch_news_score(
-                    "Invicta Holdings", article_limit=6
+                    "Invicta Holdings", article_limit=12
                 )
                 hdc_score, _ = fetch_news_score(
-                    "Hudaco Industries", article_limit=3
+                    "Hudaco Industries", article_limit=4
                 )
                 baw_score, _ = fetch_news_score(
-                    "Barloworld", article_limit=3
+                    "Barloworld", article_limit=4
                 )
                 bell_score, _ = fetch_news_score(
-                    "Bell Equipment", article_limit=3
+                    "Bell Equipment", article_limit=4
                 )
                 mdi_score, _ = fetch_news_score(
-                    "Master Drilling", article_limit=3
+                    "Master Drilling", article_limit=4
                 )
                 enx_score, _ = fetch_news_score(
-                    "enX Group", article_limit=3
+                    "enX Group", article_limit=4
                 )
 
             if ivt_news:
@@ -945,4 +1055,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
