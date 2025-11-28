@@ -80,12 +80,28 @@ def get_final_url(url):
     except:
         return url
 
+# 🔧 Improved: actually download HTML and extract body text
 def get_article_content(url):
     try:
-        downloaded = trafilatura.fetch_url(url)
-        if downloaded:
-            text = trafilatura.extract(downloaded)
-            if text and len(text) > 200: return text
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0 Safari/537.36"
+            )
+        })
+        resp = session.get(url, timeout=10)
+        if resp.status_code == 200:
+            extracted = trafilatura.extract(
+                resp.text,
+                include_comments=False,
+                include_links=False,
+                favor_recall=True
+            )
+            # Ignore cookie pages / very short junk
+            if extracted and len(extracted) > 500:
+                return extracted
     except:
         pass
     return None
@@ -230,14 +246,14 @@ def fetch_news_score(query, article_limit=5):
         full_text = get_article_content(real_url)
         
         if full_text:
-            score, label, icon, expl = analyze_content(full_text, "Full Text")
-            snippet = full_text[:300] + "..."
+            score, label, icon, expl = analyze_content(full_text, "Full Text (article body)")
+            snippet = full_text[:600] + "..."
             method = "✅ Full Text"
         else:
             raw_desc = entry.get('description', entry.title)
             import re
             clean_desc = re.sub('<.*?>', '', raw_desc)
-            score, label, icon, expl = analyze_content(clean_desc, "Snippet")
+            score, label, icon, expl = analyze_content(clean_desc, "Snippet (headline/description)")
             snippet = clean_desc
             method = "⚠️ Snippet"
             
@@ -252,12 +268,12 @@ def fetch_news_score(query, article_limit=5):
             "link": real_url,
             "source": entry.source.title if hasattr(entry, 'source') else "News",
             "date": clean_date,
-            "snippet": snippet,
+            "snippet": snippet,          # 👈 text AI actually read
             "Sentiment": label,
             "Icon": icon,
             "Score": score,
             "Explanation": expl,
-            "Method": method
+            "Method": method             # 👈 Full Text vs Snippet
         })
         
     avg_score = pd.DataFrame(news_items)['Score'].mean() if news_items else 0.0
@@ -265,7 +281,6 @@ def fetch_news_score(query, article_limit=5):
 
 # --- MAIN APP ---
 def main():
-    # REMOVED BROKEN IMAGE LINK HERE
     st.sidebar.title("Controls")
     display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
     
@@ -341,11 +356,28 @@ def main():
                 fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
                 
                 # Price Trace
-                fig.add_trace(go.Candlestick(x=history.index, open=history['Open'], high=history['High'], low=history['Low'], close=history['Close'], name="Price"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_50'], line=dict(color='royalblue', width=1.5), name="50-Day SMA"), row=1, col=1)
-                fig.add_trace(go.Scatter(x=history.index, y=history['SMA_200'], line=dict(color='firebrick', width=1.5), name="200-Day SMA"), row=1, col=1)
+                fig.add_trace(go.Candlestick(
+                    x=history.index,
+                    open=history['Open'],
+                    high=history['High'],
+                    low=history['Low'],
+                    close=history['Close'],
+                    name="Price"
+                ), row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=history.index,
+                    y=history['SMA_50'],
+                    line=dict(color='royalblue', width=1.5),
+                    name="50-Day SMA"
+                ), row=1, col=1)
+                fig.add_trace(go.Scatter(
+                    x=history.index,
+                    y=history['SMA_200'],
+                    line=dict(color='firebrick', width=1.5),
+                    name="200-Day SMA"
+                ), row=1, col=1)
                 
-                # Volume Trace with Enhanced Labelling
+                # Volume Trace
                 colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
                 fig.add_trace(go.Bar(
                     x=history.index, 
@@ -355,16 +387,25 @@ def main():
                     hovertemplate='<b>Date</b>: %{x|%d %b %Y}<br><b>Volume</b>: %{y:,} shares<extra></extra>'
                 ), row=2, col=1)
                 
-                fig.add_trace(go.Scatter(x=history.index, y=history['Vol_Avg'], mode='lines', name="Avg Vol", line=dict(color='orange', dash='dot')), row=2, col=1)
+                fig.add_trace(go.Scatter(
+                    x=history.index,
+                    y=history['Vol_Avg'],
+                    mode='lines',
+                    name="Avg Vol",
+                    line=dict(color='orange', dash='dot')
+                ), row=2, col=1)
                 
-                # Layout Updates
-                fig.update_layout(height=600, xaxis_rangeslider_visible=False, showlegend=True, legend=dict(orientation="h", y=1.02, x=0))
+                fig.update_layout(
+                    height=600,
+                    xaxis_rangeslider_visible=False,
+                    showlegend=True,
+                    legend=dict(orientation="h", y=1.02, x=0)
+                )
                 fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
-                fig.update_yaxes(title_text="Volume (Shares)", tickformat=".2s", row=2, col=1) # Smart formatting (2M, 500k)
+                fig.update_yaxes(title_text="Volume (Shares)", tickformat=".2s", row=2, col=1)
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
-                # FIXED LEGEND
                 st.markdown("### 🔑 Quick Chart Legend")
                 l1, l2, l3, l4 = st.columns(4)
                 l1.info("**SMA (Trend)**\n\nPrice > Lines = 🟢 Bullish\n\nPrice < Lines = 🔴 Bearish")
@@ -375,7 +416,6 @@ def main():
             with c_sidebar:
                 st.subheader("💡 AI Technical Verdict")
                 
-                # Trend Logic with Explanation
                 if curr > sma_50_val and curr > sma_200_val:
                     trend_msg = "Bullish"
                     trend_icon = "🟢"
@@ -389,7 +429,6 @@ def main():
                     trend_icon = "⚪"
                     trend_expl = f"Price is currently consolidating between the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
                 
-                # Momentum Logic with Explanation
                 if current_rsi > 70:
                     mom_msg = "Overbought"
                     mom_icon = "⚠️"
@@ -403,7 +442,6 @@ def main():
                     mom_icon = "✅"
                     mom_expl = f"RSI is {current_rsi:.1f}, sitting comfortably in the neutral zone (30-70)."
                     
-                # MACD Logic with Explanation
                 if macd_val > signal_val:
                     macd_msg = "Positive Divergence"
                     macd_icon = "🟢"
@@ -413,7 +451,6 @@ def main():
                     macd_icon = "🔴"
                     macd_expl = f"The MACD line ({macd_val:.2f}) is below the Signal line ({signal_val:.2f}), indicating bearish momentum."
 
-                # Display Verdicts
                 st.markdown(f"**Trend:** {trend_icon} {trend_msg}")
                 st.caption(trend_expl)
                 
@@ -445,7 +482,12 @@ def main():
                     for col in norm_df.columns:
                         width = 3 if col == 'Invicta' else 1.5
                         dash = 'solid' if col == 'Invicta' else 'dot'
-                        fig_macro.add_trace(go.Scatter(x=norm_df.index, y=norm_df[col], name=col, line=dict(color=colors.get(col, 'black'), width=width, dash=dash)))
+                        fig_macro.add_trace(go.Scatter(
+                            x=norm_df.index,
+                            y=norm_df[col],
+                            name=col,
+                            line=dict(color=colors.get(col, 'black'), width=width, dash=dash)
+                        ))
                     fig_macro.update_layout(height=400, yaxis_title="Performance (%)", hovermode="x unified")
                     st.plotly_chart(fig_macro, use_container_width=True)
                 with c_stats:
@@ -456,7 +498,6 @@ def main():
         with tab_fin:
             st.subheader("📊 Financial Health Comparison")
             
-            # 1. ANNUAL RESULTS
             st.markdown("### 🗓️ Annual Results (Full Financial Year)")
             if not financials.empty and financials.shape[1] >= 2:
                 latest_date = financials.columns[0]
@@ -481,9 +522,6 @@ def main():
 
             st.divider()
 
-            # 2. INTERIM (SEPTEMBER) LOGIC (With Fallback Removal)
-            
-            # Search for September column
             sept_col = None
             if not quarterly_fin.empty:
                 for col in quarterly_fin.columns:
@@ -491,7 +529,6 @@ def main():
                         sept_col = col
                         break
 
-            # Only show if September data is found
             if sept_col:
                 st.markdown("### ⏱️ Year to Date / Interim (September Trend)")
                 st.caption(f"Showing Interim Data for: {sept_col.strftime('%B %Y')}")
@@ -526,7 +563,6 @@ def main():
             
             st.divider()
             
-            # 3. RATIO ANALYSIS (NEW)
             c_r1, c_r2 = st.columns(2)
             
             with c_r1:
@@ -543,17 +579,14 @@ def main():
 
                     ratios_data = []
                     
-                    # Gross Margin
                     gm_curr = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 0)
                     gm_prev = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 1)
                     ratios_data.append({"Ratio": "Gross Margin", "Current (%)": f"{gm_curr:.2f}%", "Prior (%)": f"{gm_prev:.2f}%"})
                     
-                    # Operating Margin
                     om_curr = calc_ratio(financials, 'Operating Income', 'Total Revenue', 0)
                     om_prev = calc_ratio(financials, 'Operating Income', 'Total Revenue', 1)
                     ratios_data.append({"Ratio": "Operating Margin", "Current (%)": f"{om_curr:.2f}%", "Prior (%)": f"{om_prev:.2f}%"})
 
-                    # Net Margin
                     nm_curr = calc_ratio(financials, 'Net Income', 'Total Revenue', 0)
                     nm_prev = calc_ratio(financials, 'Net Income', 'Total Revenue', 1)
                     ratios_data.append({"Ratio": "Net Margin", "Current (%)": f"{nm_curr:.2f}%", "Prior (%)": f"{nm_prev:.2f}%"})
@@ -568,19 +601,15 @@ def main():
                     comp_metrics, _ = get_competitor_financials()
                 
                 if not comp_metrics.empty:
-                    # Filter for just the ratio columns
                     cols_to_show = ["Company", "Gross Margin (%)", "Op Margin (%)", "ROE (%)"]
-                    # Check if columns exist (safe check)
                     valid_cols = [c for c in cols_to_show if c in comp_metrics.columns]
                     
-                    # Format
                     comp_metrics_style = comp_metrics[valid_cols].copy()
                     for c in valid_cols[1:]:
                         comp_metrics_style[c] = comp_metrics_style[c].apply(lambda x: f"{x:.2f}%")
                         
                     st.dataframe(comp_metrics_style, use_container_width=True, hide_index=True)
 
-            # --- CHART ---
             if not financials.empty:
                 fin_T = financials.T.iloc[:4][::-1]
                 try:
@@ -646,7 +675,6 @@ def main():
                 mdi_score, _ = fetch_news_score("Master Drilling", article_limit=3)
                 enx_score, _ = fetch_news_score("enX Group", article_limit=3)
 
-            # --- IVT Sentiment Trend Over Time ---
             if ivt_news:
                 trend_df = pd.DataFrame(ivt_news)
                 trend_df['DateParsed'] = pd.to_datetime(
@@ -670,7 +698,6 @@ def main():
             s1, s2 = st.columns([1.2, 1.8])
 
             with s1:
-                # IVT Sentiment Trend
                 st.markdown("#### IVT Sentiment Trend")
                 if not daily.empty:
                     fig_trend = go.Figure(
@@ -690,7 +717,6 @@ def main():
                 else:
                     st.caption("Not enough dated news to plot a sentiment trend yet.")
 
-                # Sentiment Battle
                 st.markdown("#### Sentiment Battle")
                 comp_data = {
                     'Company': [
@@ -732,7 +758,12 @@ def main():
                         with st.expander(f"{item['Icon']} {item['title']}"):
                             c_t, c_i = st.columns([3, 1])
                             with c_t:
-                                st.caption(f"{item['source']} | {item['date']}")
+                                st.caption(f"{item['source']} | {item['date']} | {item['Method']}")
+                                
+                                # 👇 Show what the AI actually read
+                                st.write(item['snippet'])
+                                
+                                st.markdown("---")
                                 st.write(item['Explanation'])
                                 st.markdown(f"[Read Article]({item['link']})")
                             with c_i:
