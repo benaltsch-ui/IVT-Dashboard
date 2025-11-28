@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -10,7 +11,6 @@ import feedparser
 import requests
 import trafilatura
 from email.utils import parsedate_to_datetime
-import datetime
 
 # --- CONFIGURATION ---
 st.set_page_config(page_title="Invicta Holdings Pro Dashboard", layout="wide", page_icon="🏭")
@@ -44,44 +44,45 @@ except Exception as e:
 
 # --- HELPER FUNCTIONS ---
 def format_large_number(num):
-    if num is None: return "N/A"
-    if isinstance(num, str): return num
+    if num is None:
+        return "N/A"
+    if isinstance(num, str):
+        return num
     try:
         val = float(num)
-    except:
+    except Exception:
         return "N/A"
         
-    if val >= 1e9: return f"R {val/1e9:.2f} B"
-    elif val >= 1e6: return f"R {val/1e6:.2f} M"
-    else: return f"R {val:,.2f}"
+    if val >= 1e9:
+        return f"R {val/1e9:.2f} B"
+    elif val >= 1e6:
+        return f"R {val/1e6:.2f} M"
+    else:
+        return f"R {val:,.2f}"
 
 def calculate_change(current, previous):
     try:
-        if previous is None or previous == 0: return 0.0
+        if previous is None or previous == 0:
+            return 0.0
         return ((current - previous) / abs(previous)) * 100
-    except:
+    except Exception:
         return 0.0
 
 def safe_get_financial_value(df, metric_name, col_index=0):
     try:
-        if df.empty: return 0
+        if df.empty:
+            return 0
         if metric_name in df.index:
             return df.loc[metric_name].iloc[col_index]
         return 0
-    except:
+    except Exception:
         return 0
 
 def get_final_url(url):
-    try:
-        session = requests.Session()
-        session.headers.update({"User-Agent": "Mozilla/5.0"})
-        response = session.head(url, allow_redirects=True, timeout=5)
-        return response.url
-    except:
-        return url
-
-# 🔧 Improved: actually download HTML and extract body text
-def get_article_content(url):
+    """
+    Follow Google News and other redirects using a real GET,
+    so we end up on the actual publisher article.
+    """
     try:
         session = requests.Session()
         session.headers.update({
@@ -91,26 +92,41 @@ def get_article_content(url):
                 "Chrome/122.0 Safari/537.36"
             )
         })
-        resp = session.get(url, timeout=10)
-        if resp.status_code == 200:
-            extracted = trafilatura.extract(
-                resp.text,
+        resp = session.get(url, allow_redirects=True, timeout=10)
+        if resp.ok:
+            return resp.url
+        return url
+    except Exception:
+        return url
+
+def get_article_content(url):
+    """
+    Use trafilatura to download and extract main article text.
+    Lower threshold so short but valid articles still count.
+    """
+    try:
+        downloaded = trafilatura.fetch_url(url)
+        if downloaded:
+            text = trafilatura.extract(
+                downloaded,
                 include_comments=False,
                 include_links=False,
                 favor_recall=True
             )
-            # Ignore cookie pages / very short junk
-            if extracted and len(extracted) > 500:
-                return extracted
-    except:
+            if text and len(text) > 250:
+                return text
+    except Exception:
         pass
     return None
 
 def analyze_content(text, method="Snippet"):
     score = sia.polarity_scores(text)['compound']
-    if score >= 0.05: label, icon = "Positive", "🟢"
-    elif score <= -0.05: label, icon = "Negative", "🔴"
-    else: label, icon = "Neutral", "⚪"
+    if score >= 0.05:
+        label, icon = "Positive", "🟢"
+    elif score <= -0.05:
+        label, icon = "Negative", "🔴"
+    else:
+        label, icon = "Neutral", "⚪"
     
     words = text.lower().split()
     drivers = []
@@ -118,12 +134,17 @@ def analyze_content(text, method="Snippet"):
         clean_word = word.strip('.,!?"\'()')
         if clean_word in sia.lexicon:
             val = sia.lexicon[clean_word]
-            if abs(val) >= 1.0: drivers.append((clean_word, val))
+            if abs(val) >= 1.0:
+                drivers.append((clean_word, val))
     
     drivers.sort(key=lambda x: abs(x[1]), reverse=True)
     unique_drivers = list(set([x[0] for x in drivers]))[:5]
     
-    explanation = f"Based on {method}. Key drivers: " + ", ".join([f"**{w}**" for w in unique_drivers]) if unique_drivers else f"Based on {method}."
+    explanation = (
+        f"Based on {method}. Key drivers: " +
+        ", ".join([f"**{w}**" for w in unique_drivers])
+        if unique_drivers else f"Based on {method}."
+    )
     return score, label, icon, explanation
 
 # --- DATA FETCHING ---
@@ -131,24 +152,24 @@ def analyze_content(text, method="Snippet"):
 def get_market_data(ticker, period="1y"):
     try:
         stock = yf.Ticker(ticker)
-        history = stock.history(period="2y") 
+        history = stock.history(period="2y")
         info = stock.info
         financials = stock.financials
         quarterly_fin = stock.quarterly_financials
         balance_sheet = stock.balance_sheet
         
-        # --- FIX: Convert Cents to Rands ---
+        # Convert cents to rands if needed
         if not history.empty:
             current_price = history['Close'].iloc[-1]
-            if current_price > 500: # Threshold to detect if data is in Cents (ZAc)
+            if current_price > 500:
                 cols_to_fix = ['Open', 'High', 'Low', 'Close']
                 history[cols_to_fix] = history[cols_to_fix] / 100
         
         return history, info, financials, quarterly_fin, balance_sheet
-    except:
+    except Exception:
         return pd.DataFrame(), {}, pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-@st.cache_data(ttl=3600) 
+@st.cache_data(ttl=3600)
 def get_macro_data(period="1y"):
     tickers = {
         "Invicta": "IVT.JO",
@@ -162,7 +183,7 @@ def get_macro_data(period="1y"):
             if not hist.empty:
                 hist.index = hist.index.tz_localize(None)
                 data[name] = hist['Close']
-        except:
+        except Exception:
             continue
     
     if 'Invicta' in data.columns and data['Invicta'].mean() > 500:
@@ -170,7 +191,7 @@ def get_macro_data(period="1y"):
         
     return data.ffill().bfill()
 
-@st.cache_data(ttl=3600) 
+@st.cache_data(ttl=3600)
 def get_competitor_financials():
     tickers = {
         "Invicta (IVT)": "IVT.JO",
@@ -203,7 +224,6 @@ def get_competitor_financials():
             pe = info.get('trailingPE', 0)
             m_cap = (info.get('marketCap', 0) or 0) / 1e9
             
-            # Additional Ratios for Comparison
             gross_margin = info.get('grossMargins', 0)
             op_margin = info.get('operatingMargins', 0)
             roe = info.get('returnOnEquity', 0)
@@ -225,7 +245,7 @@ def get_competitor_financials():
                 "ROE (%)": roe * 100 if roe else 0,
                 "1Y Return (%)": history_df[name].iloc[-1] if not hist.empty else 0
             })
-        except:
+        except Exception:
             continue
             
     return pd.DataFrame(metrics), history_df
@@ -233,10 +253,14 @@ def get_competitor_financials():
 @st.cache_data(ttl=3600)
 def fetch_news_score(query, article_limit=5):
     encoded = query.replace(" ", "%20")
-    rss_url = f"https://news.google.com/rss/search?q={encoded}+South+Africa&hl=en-ZA&gl=ZA&ceid=ZA:en"
+    rss_url = (
+        f"https://news.google.com/rss/search?q={encoded}+South+Africa"
+        f"&hl=en-ZA&gl=ZA&ceid=ZA:en"
+    )
     feed = feedparser.parse(rss_url)
     
-    if not feed.entries: return 0.0, []
+    if not feed.entries:
+        return 0.0, []
     
     news_items = []
     limit = min(len(feed.entries), article_limit)
@@ -246,21 +270,25 @@ def fetch_news_score(query, article_limit=5):
         full_text = get_article_content(real_url)
         
         if full_text:
-            score, label, icon, expl = analyze_content(full_text, "Full Text (article body)")
+            score, label, icon, expl = analyze_content(
+                full_text, "Full Text (article body)"
+            )
             snippet = full_text[:600] + "..."
             method = "✅ Full Text"
         else:
             raw_desc = entry.get('description', entry.title)
             import re
             clean_desc = re.sub('<.*?>', '', raw_desc)
-            score, label, icon, expl = analyze_content(clean_desc, "Snippet (headline/description)")
+            score, label, icon, expl = analyze_content(
+                clean_desc, "Snippet (headline/description)"
+            )
             snippet = clean_desc
             method = "⚠️ Snippet"
             
         try:
             dt = parsedate_to_datetime(entry.published)
             clean_date = dt.strftime("%d %b %Y")
-        except:
+        except Exception:
             clean_date = "Recent"
 
         news_items.append({
@@ -268,12 +296,12 @@ def fetch_news_score(query, article_limit=5):
             "link": real_url,
             "source": entry.source.title if hasattr(entry, 'source') else "News",
             "date": clean_date,
-            "snippet": snippet,          # 👈 text AI actually read
+            "snippet": snippet,
             "Sentiment": label,
             "Icon": icon,
             "Score": score,
             "Explanation": expl,
-            "Method": method             # 👈 Full Text vs Snippet
+            "Method": method
         })
         
     avg_score = pd.DataFrame(news_items)['Score'].mean() if news_items else 0.0
@@ -282,15 +310,19 @@ def fetch_news_score(query, article_limit=5):
 # --- MAIN APP ---
 def main():
     st.sidebar.title("Controls")
-    display_period = st.sidebar.selectbox("Chart View", ["3mo", "6mo", "1y", "2y"], index=2)
+    display_period = st.sidebar.selectbox(
+        "Chart View", ["3mo", "6mo", "1y", "2y"], index=2
+    )
     
     st.title("🏭 Invicta Holdings (IVT)")
     st.caption("Strategic Intelligence Dashboard")
 
-    history_full, info, financials, quarterly_fin, balance_sheet = get_market_data("IVT.JO", period="2y")
+    history_full, info, financials, quarterly_fin, balance_sheet = get_market_data(
+        "IVT.JO", period="2y"
+    )
     
     if not history_full.empty:
-        # --- TECHNICAL CALCULATIONS ---
+        # TECHNICALS
         history_full['SMA_50'] = history_full['Close'].rolling(window=50).mean()
         history_full['SMA_200'] = history_full['Close'].rolling(window=200).mean()
         
@@ -307,10 +339,14 @@ def main():
 
         history_full['Vol_Avg'] = history_full['Volume'].rolling(window=30).mean()
 
-        if display_period == "3mo": slice_days = 90
-        elif display_period == "6mo": slice_days = 180
-        elif display_period == "1y": slice_days = 365
-        else: slice_days = 730
+        if display_period == "3mo":
+            slice_days = 90
+        elif display_period == "6mo":
+            slice_days = 180
+        elif display_period == "1y":
+            slice_days = 365
+        else:
+            slice_days = 730
         history = history_full.tail(slice_days).copy()
         
         curr = history['Close'].iloc[-1]
@@ -330,8 +366,10 @@ def main():
             calculated_yield = (div_rate / curr) * 100
         else:
             raw_yield = info.get('dividendYield', 0) or 0
-            if raw_yield > 0.5: calculated_yield = raw_yield
-            else: calculated_yield = raw_yield * 100
+            if raw_yield > 0.5:
+                calculated_yield = raw_yield
+            else:
+                calculated_yield = raw_yield * 100
 
         m1, m2, m3, m4, m5 = st.columns(5)
         m1.metric("Share Price", f"R {curr:.2f}", f"{pct:.2f}%")
@@ -340,7 +378,7 @@ def main():
         m4.metric("Dividend Yield", f"{calculated_yield:.2f}%")
         m5.metric("Market Cap", f"R {info.get('marketCap', 0)/1e9:.2f} B")
 
-        # --- TABS ---
+        # TABS
         tab_market, tab_macro, tab_fin, tab_comp, tab_sent = st.tabs([
             "📈 Market & Technicals",
             "🔗 Macro & Correlations", 
@@ -349,13 +387,16 @@ def main():
             "📰 AI Sentiment"
         ])
 
+        # --- Market & Technicals ---
         with tab_market:
             c_main, c_sidebar = st.columns([3, 1])
             with c_main:
                 st.subheader("Price & Volume Analysis")
-                fig = make_subplots(rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.1, row_heights=[0.7, 0.3])
+                fig = make_subplots(
+                    rows=2, cols=1, shared_xaxes=True,
+                    vertical_spacing=0.1, row_heights=[0.7, 0.3]
+                )
                 
-                # Price Trace
                 fig.add_trace(go.Candlestick(
                     x=history.index,
                     open=history['Open'],
@@ -377,14 +418,17 @@ def main():
                     name="200-Day SMA"
                 ), row=1, col=1)
                 
-                # Volume Trace
-                colors = ['#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853' for index, row in history.iterrows()]
+                colors = [
+                    '#EA4335' if row['Open'] - row['Close'] > 0 else '#34A853'
+                    for _, row in history.iterrows()
+                ]
                 fig.add_trace(go.Bar(
-                    x=history.index, 
-                    y=history['Volume'], 
-                    marker_color=colors, 
+                    x=history.index,
+                    y=history['Volume'],
+                    marker_color=colors,
                     name="Volume",
-                    hovertemplate='<b>Date</b>: %{x|%d %b %Y}<br><b>Volume</b>: %{y:,} shares<extra></extra>'
+                    hovertemplate='<b>Date</b>: %{x|%d %b %Y}<br>'
+                                  '<b>Volume</b>: %{y:,} shares<extra></extra>'
                 ), row=2, col=1)
                 
                 fig.add_trace(go.Scatter(
@@ -402,7 +446,9 @@ def main():
                     legend=dict(orientation="h", y=1.02, x=0)
                 )
                 fig.update_yaxes(title_text="Price (ZAR)", row=1, col=1)
-                fig.update_yaxes(title_text="Volume (Shares)", tickformat=".2s", row=2, col=1)
+                fig.update_yaxes(
+                    title_text="Volume (Shares)", tickformat=".2s", row=2, col=1
+                )
                 
                 st.plotly_chart(fig, use_container_width=True)
                 
@@ -419,37 +465,64 @@ def main():
                 if curr > sma_50_val and curr > sma_200_val:
                     trend_msg = "Bullish"
                     trend_icon = "🟢"
-                    trend_expl = f"Price (R {curr:.2f}) is trading above both the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
+                    trend_expl = (
+                        f"Price (R {curr:.2f}) is trading above both "
+                        f"the 50-day (R {sma_50_val:.2f}) and "
+                        f"200-day (R {sma_200_val:.2f}) averages."
+                    )
                 elif curr < sma_50_val and curr < sma_200_val:
                     trend_msg = "Bearish"
                     trend_icon = "🔴"
-                    trend_expl = f"Price (R {curr:.2f}) is trading below both the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
+                    trend_expl = (
+                        f"Price (R {curr:.2f}) is trading below both "
+                        f"the 50-day (R {sma_50_val:.2f}) and "
+                        f"200-day (R {sma_200_val:.2f}) averages."
+                    )
                 else:
                     trend_msg = "Neutral"
                     trend_icon = "⚪"
-                    trend_expl = f"Price is currently consolidating between the 50-day (R {sma_50_val:.2f}) and 200-day (R {sma_200_val:.2f}) averages."
+                    trend_expl = (
+                        "Price is currently consolidating between the "
+                        f"50-day (R {sma_50_val:.2f}) and "
+                        f"200-day (R {sma_200_val:.2f}) averages."
+                    )
                 
                 if current_rsi > 70:
                     mom_msg = "Overbought"
                     mom_icon = "⚠️"
-                    mom_expl = f"RSI is {current_rsi:.1f} (>70), suggesting the stock may be due for a pullback."
+                    mom_expl = (
+                        f"RSI is {current_rsi:.1f} (>70), suggesting "
+                        "the stock may be due for a pullback."
+                    )
                 elif current_rsi < 30:
                     mom_msg = "Oversold"
                     mom_icon = "♻️"
-                    mom_expl = f"RSI is {current_rsi:.1f} (<30), suggesting the stock may be undervalued/due for a bounce."
+                    mom_expl = (
+                        f"RSI is {current_rsi:.1f} (<30), suggesting "
+                        "the stock may be undervalued/due for a bounce."
+                    )
                 else:
                     mom_msg = "Stable"
                     mom_icon = "✅"
-                    mom_expl = f"RSI is {current_rsi:.1f}, sitting comfortably in the neutral zone (30-70)."
+                    mom_expl = (
+                        f"RSI is {current_rsi:.1f}, sitting comfortably "
+                        "in the neutral zone (30–70)."
+                    )
                     
                 if macd_val > signal_val:
                     macd_msg = "Positive Divergence"
                     macd_icon = "🟢"
-                    macd_expl = f"The MACD line ({macd_val:.2f}) is above the Signal line ({signal_val:.2f}), indicating bullish momentum."
+                    macd_expl = (
+                        f"The MACD line ({macd_val:.2f}) is above the "
+                        f"Signal line ({signal_val:.2f}), indicating bullish momentum."
+                    )
                 else:
                     macd_msg = "Negative Divergence"
                     macd_icon = "🔴"
-                    macd_expl = f"The MACD line ({macd_val:.2f}) is below the Signal line ({signal_val:.2f}), indicating bearish momentum."
+                    macd_expl = (
+                        f"The MACD line ({macd_val:.2f}) is below the "
+                        f"Signal line ({signal_val:.2f}), indicating bearish momentum."
+                    )
 
                 st.markdown(f"**Trend:** {trend_icon} {trend_msg}")
                 st.caption(trend_expl)
@@ -467,6 +540,7 @@ def main():
                 st.metric("52-Week High", f"R {high_52:.2f}")
                 st.metric("52-Week Low", f"R {low_52:.2f}")
 
+        # --- Macro ---
         with tab_macro:
             st.subheader("🔗 Macro-Economic Correlations")
             with st.spinner("Analyzing macro data..."):
@@ -478,7 +552,11 @@ def main():
                     st.markdown("#### 🌍 Relative Performance Comparison")
                     norm_df = (macro_df / macro_df.iloc[0]) * 100 - 100
                     fig_macro = go.Figure()
-                    colors = {'Invicta': '#1f77b4', 'USD/ZAR': 'orange', 'JSE Industrials': 'gray'}
+                    colors = {
+                        'Invicta': '#1f77b4',
+                        'USD/ZAR': 'orange',
+                        'JSE Industrials': 'gray'
+                    }
                     for col in norm_df.columns:
                         width = 3 if col == 'Invicta' else 1.5
                         dash = 'solid' if col == 'Invicta' else 'dot'
@@ -486,15 +564,21 @@ def main():
                             x=norm_df.index,
                             y=norm_df[col],
                             name=col,
-                            line=dict(color=colors.get(col, 'black'), width=width, dash=dash)
+                            line=dict(color=colors.get(col, 'black'),
+                                      width=width, dash=dash)
                         ))
-                    fig_macro.update_layout(height=400, yaxis_title="Performance (%)", hovermode="x unified")
+                    fig_macro.update_layout(
+                        height=400,
+                        yaxis_title="Performance (%)",
+                        hovermode="x unified"
+                    )
                     st.plotly_chart(fig_macro, use_container_width=True)
                 with c_stats:
                     st.markdown("#### 🔢 Correlation")
                     corr_matrix = macro_df.pct_change().corr()['Invicta'].drop('Invicta')
                     st.dataframe(corr_matrix, use_container_width=True)
 
+        # --- Financial Health ---
         with tab_fin:
             st.subheader("📊 Financial Health Comparison")
             
@@ -503,7 +587,10 @@ def main():
                 latest_date = financials.columns[0]
                 prev_date = financials.columns[1]
                 
-                metrics_list = ['Total Revenue', 'Gross Profit', 'EBITDA', 'Net Income', 'Basic EPS']
+                metrics_list = [
+                    'Total Revenue', 'Gross Profit',
+                    'EBITDA', 'Net Income', 'Basic EPS'
+                ]
                 fin_data = []
                 for m in metrics_list:
                     val_curr = safe_get_financial_value(financials, m, 0)
@@ -516,12 +603,17 @@ def main():
                             f"{prev_date.strftime('%Y')} (Prior)": format_large_number(val_prev),
                             "Change (%)": f"{change:+.2f}%"
                         })
-                st.dataframe(pd.DataFrame(fin_data), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(fin_data),
+                    use_container_width=True,
+                    hide_index=True
+                )
             else:
                 st.warning("Insufficient Annual Data available.")
 
             st.divider()
 
+            # Interim (September) if available
             sept_col = None
             if not quarterly_fin.empty:
                 for col in quarterly_fin.columns:
@@ -535,19 +627,27 @@ def main():
                 q_metrics = ['Total Revenue', 'Net Income', 'Operating Income']
                 q_data = []
                 for m in q_metrics:
-                    q_curr = quarterly_fin.loc[m, sept_col] if m in quarterly_fin.index else 0
+                    q_curr = (
+                        quarterly_fin.loc[m, sept_col]
+                        if m in quarterly_fin.index else 0
+                    )
                     
                     prev_sept_col = None
                     for col in quarterly_fin.columns:
-                        if isinstance(col, pd.Timestamp) and col.month == 9 and col.year == (sept_col.year - 1):
+                        if (isinstance(col, pd.Timestamp)
+                            and col.month == 9
+                            and col.year == (sept_col.year - 1)):
                             prev_sept_col = col
                             break
                     
                     if prev_sept_col:
-                        q_last = quarterly_fin.loc[m, prev_sept_col] if m in quarterly_fin.index else 0
+                        q_last = (
+                            quarterly_fin.loc[m, prev_sept_col]
+                            if m in quarterly_fin.index else 0
+                        )
                         compare_label = f"Sept {prev_sept_col.year}"
                     else:
-                        q_last = 0 
+                        q_last = 0
                         compare_label = "Prior Period"
 
                     if q_curr != 0:
@@ -559,7 +659,11 @@ def main():
                             compare_label: format_large_number(q_last),
                             "Change (%)": f"{q_chg:+.2f}%"
                         })
-                st.dataframe(pd.DataFrame(q_data), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    pd.DataFrame(q_data),
+                    use_container_width=True,
+                    hide_index=True
+                )
             
             st.divider()
             
@@ -568,30 +672,44 @@ def main():
             with c_r1:
                 st.markdown("### 📉 Ratio Analysis: Year-over-Year")
                 if not financials.empty and financials.shape[1] >= 2:
-                    
                     def calc_ratio(df, num, den, col):
                         try:
                             n = df.loc[num].iloc[col]
                             d = df.loc[den].iloc[col]
                             return (n / d) * 100 if d != 0 else 0
-                        except:
+                        except Exception:
                             return 0
 
                     ratios_data = []
-                    
                     gm_curr = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 0)
                     gm_prev = calc_ratio(financials, 'Gross Profit', 'Total Revenue', 1)
-                    ratios_data.append({"Ratio": "Gross Margin", "Current (%)": f"{gm_curr:.2f}%", "Prior (%)": f"{gm_prev:.2f}%"})
+                    ratios_data.append({
+                        "Ratio": "Gross Margin",
+                        "Current (%)": f"{gm_curr:.2f}%",
+                        "Prior (%)": f"{gm_prev:.2f}%"
+                    })
                     
                     om_curr = calc_ratio(financials, 'Operating Income', 'Total Revenue', 0)
                     om_prev = calc_ratio(financials, 'Operating Income', 'Total Revenue', 1)
-                    ratios_data.append({"Ratio": "Operating Margin", "Current (%)": f"{om_curr:.2f}%", "Prior (%)": f"{om_prev:.2f}%"})
+                    ratios_data.append({
+                        "Ratio": "Operating Margin",
+                        "Current (%)": f"{om_curr:.2f}%",
+                        "Prior (%)": f"{om_prev:.2f}%"
+                    })
 
                     nm_curr = calc_ratio(financials, 'Net Income', 'Total Revenue', 0)
                     nm_prev = calc_ratio(financials, 'Net Income', 'Total Revenue', 1)
-                    ratios_data.append({"Ratio": "Net Margin", "Current (%)": f"{nm_curr:.2f}%", "Prior (%)": f"{nm_prev:.2f}%"})
+                    ratios_data.append({
+                        "Ratio": "Net Margin",
+                        "Current (%)": f"{nm_curr:.2f}%",
+                        "Prior (%)": f"{nm_prev:.2f}%"
+                    })
                     
-                    st.dataframe(pd.DataFrame(ratios_data), use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        pd.DataFrame(ratios_data),
+                        use_container_width=True,
+                        hide_index=True
+                    )
                 else:
                     st.caption("Insufficient data for ratio analysis.")
 
@@ -601,31 +719,60 @@ def main():
                     comp_metrics, _ = get_competitor_financials()
                 
                 if not comp_metrics.empty:
-                    cols_to_show = ["Company", "Gross Margin (%)", "Op Margin (%)", "ROE (%)"]
-                    valid_cols = [c for c in cols_to_show if c in comp_metrics.columns]
+                    cols_to_show = [
+                        "Company", "Gross Margin (%)",
+                        "Op Margin (%)", "ROE (%)"
+                    ]
+                    valid_cols = [
+                        c for c in cols_to_show if c in comp_metrics.columns
+                    ]
                     
                     comp_metrics_style = comp_metrics[valid_cols].copy()
                     for c in valid_cols[1:]:
-                        comp_metrics_style[c] = comp_metrics_style[c].apply(lambda x: f"{x:.2f}%")
+                        comp_metrics_style[c] = comp_metrics_style[c].apply(
+                            lambda x: f"{x:.2f}%"
+                        )
                         
-                    st.dataframe(comp_metrics_style, use_container_width=True, hide_index=True)
+                    st.dataframe(
+                        comp_metrics_style,
+                        use_container_width=True,
+                        hide_index=True
+                    )
 
             if not financials.empty:
                 fin_T = financials.T.iloc[:4][::-1]
                 try:
-                    formatted_dates = [d.strftime('%b %Y') if isinstance(d, pd.Timestamp) else str(d) for d in fin_T.index]
-                except:
+                    formatted_dates = [
+                        d.strftime('%b %Y')
+                        if isinstance(d, pd.Timestamp) else str(d)
+                        for d in fin_T.index
+                    ]
+                except Exception:
                     formatted_dates = fin_T.index.astype(str)
 
                 fig_fin = go.Figure()
                 if 'Total Revenue' in fin_T.columns:
-                    fig_fin.add_trace(go.Bar(x=formatted_dates, y=fin_T['Total Revenue'], name='Revenue', marker_color='#1f77b4'))
+                    fig_fin.add_trace(go.Bar(
+                        x=formatted_dates,
+                        y=fin_T['Total Revenue'],
+                        name='Revenue',
+                        marker_color='#1f77b4'
+                    ))
                 if 'Net Income' in fin_T.columns:
-                    fig_fin.add_trace(go.Bar(x=formatted_dates, y=fin_T['Net Income'], name='Net Income', marker_color='#2ca02c'))
+                    fig_fin.add_trace(go.Bar(
+                        x=formatted_dates,
+                        y=fin_T['Net Income'],
+                        name='Net Income',
+                        marker_color='#2ca02c'
+                    ))
                 
-                fig_fin.update_layout(height=350, title="Annual Trend (Year End March)")
+                fig_fin.update_layout(
+                    height=350,
+                    title="Annual Trend (Year End March)"
+                )
                 st.plotly_chart(fig_fin, use_container_width=True)
 
+        # --- Competitor Benchmarks ---
         with tab_comp:
             st.markdown("### ⚔️ Peer Comparison")
             with st.spinner("Analyzing Peers..."):
@@ -652,28 +799,56 @@ def main():
                             name=col,
                             line=dict(width=width, color=colors.get(col, "gray"))
                         ))
-                    fig_rel.update_layout(height=350, margin=dict(l=0, r=0, t=30, b=0), yaxis_title="Growth %")
+                    fig_rel.update_layout(
+                        height=350,
+                        margin=dict(l=0, r=0, t=30, b=0),
+                        yaxis_title="Growth %"
+                    )
                     st.plotly_chart(fig_rel, use_container_width=True)
                 with col_c2:
                     styled_df = comp_metrics.copy()
-                    styled_df['Price'] = styled_df['Price'].apply(lambda x: f"R {x:.2f}")
-                    styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(lambda x: f"{x:.2f}")
-                    styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(lambda x: f"{x:.2f}%")
-                    styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(lambda x: f"R {x:.2f} B")
+                    styled_df['Price'] = styled_df['Price'].apply(
+                        lambda x: f"R {x:.2f}"
+                    )
+                    styled_df['P/E Ratio'] = styled_df['P/E Ratio'].apply(
+                        lambda x: f"{x:.2f}"
+                    )
+                    styled_df['Div Yield (%)'] = styled_df['Div Yield (%)'].apply(
+                        lambda x: f"{x:.2f}%"
+                    )
+                    styled_df['Market Cap (B)'] = styled_df['Market Cap (B)'].apply(
+                        lambda x: f"R {x:.2f} B"
+                    )
                     st.dataframe(
-                        styled_df[['Company', 'Price', 'P/E Ratio', 'Div Yield (%)', 'Market Cap (B)']],
+                        styled_df[
+                            ['Company', 'Price', 'P/E Ratio',
+                             'Div Yield (%)', 'Market Cap (B)']
+                        ],
                         hide_index=True,
                         use_container_width=True
                     )
 
+        # --- AI Sentiment ---
         with tab_sent:
             with st.spinner("AI is reading the news..."):
-                ivt_score, ivt_news = fetch_news_score("Invicta Holdings", article_limit=6)
-                hdc_score, _ = fetch_news_score("Hudaco Industries", article_limit=3)
-                baw_score, _ = fetch_news_score("Barloworld", article_limit=3)
-                bell_score, _ = fetch_news_score("Bell Equipment", article_limit=3)
-                mdi_score, _ = fetch_news_score("Master Drilling", article_limit=3)
-                enx_score, _ = fetch_news_score("enX Group", article_limit=3)
+                ivt_score, ivt_news = fetch_news_score(
+                    "Invicta Holdings", article_limit=6
+                )
+                hdc_score, _ = fetch_news_score(
+                    "Hudaco Industries", article_limit=3
+                )
+                baw_score, _ = fetch_news_score(
+                    "Barloworld", article_limit=3
+                )
+                bell_score, _ = fetch_news_score(
+                    "Bell Equipment", article_limit=3
+                )
+                mdi_score, _ = fetch_news_score(
+                    "Master Drilling", article_limit=3
+                )
+                enx_score, _ = fetch_news_score(
+                    "enX Group", article_limit=3
+                )
 
             if ivt_news:
                 trend_df = pd.DataFrame(ivt_news)
@@ -700,14 +875,12 @@ def main():
             with s1:
                 st.markdown("#### IVT Sentiment Trend")
                 if not daily.empty:
-                    fig_trend = go.Figure(
-                        go.Scatter(
-                            x=daily['DateParsed'],
-                            y=daily['Score'],
-                            mode='lines+markers',
-                            name='IVT Sentiment'
-                        )
-                    )
+                    fig_trend = go.Figure(go.Scatter(
+                        x=daily['DateParsed'],
+                        y=daily['Score'],
+                        mode='lines+markers',
+                        name='IVT Sentiment'
+                    ))
                     fig_trend.update_layout(
                         height=220,
                         margin=dict(l=0, r=0, t=10, b=0),
@@ -737,13 +910,11 @@ def main():
                     ]
                 }
                 df_comp = pd.DataFrame(comp_data)
-                fig_comp = go.Figure(
-                    go.Bar(
-                        x=df_comp['Score'],
-                        y=df_comp['Company'],
-                        orientation='h'
-                    )
-                )
+                fig_comp = go.Figure(go.Bar(
+                    x=df_comp['Score'],
+                    y=df_comp['Company'],
+                    orientation='h'
+                ))
                 fig_comp.update_layout(
                     height=260,
                     margin=dict(l=0, r=0, t=10, b=0),
@@ -758,11 +929,11 @@ def main():
                         with st.expander(f"{item['Icon']} {item['title']}"):
                             c_t, c_i = st.columns([3, 1])
                             with c_t:
-                                st.caption(f"{item['source']} | {item['date']} | {item['Method']}")
-                                
-                                # 👇 Show what the AI actually read
+                                st.caption(
+                                    f"{item['source']} | {item['date']} | {item['Method']}"
+                                )
+                                # Text the AI actually read
                                 st.write(item['snippet'])
-                                
                                 st.markdown("---")
                                 st.write(item['Explanation'])
                                 st.markdown(f"[Read Article]({item['link']})")
@@ -774,3 +945,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+```
