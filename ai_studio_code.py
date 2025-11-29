@@ -9,6 +9,7 @@ from nltk.sentiment.vader import SentimentIntensityAnalyzer
 import feedparser
 import requests
 import trafilatura
+import re
 from email.utils import parsedate_to_datetime
 
 # --- CONFIGURATION ---
@@ -102,12 +103,67 @@ def get_final_url(url):
     except Exception:
         return url
 
+def _extract_paragraph_fallback(html):
+    """
+    Light-weight fallback parser that stitches readable <p> blocks together
+    when structured extraction fails.
+    """
+    try:
+        paragraphs = re.findall(r"<p[^>]*>(.*?)</p>", html, flags=re.IGNORECASE | re.DOTALL)
+        cleaned = []
+        for para in paragraphs:
+            text = re.sub("<.*?>", " ", para)
+            text = re.sub(r"\s+", " ", text).strip()
+            if len(text) >= 40:
+                cleaned.append(text)
+
+        combined = " ".join(cleaned)
+        if len(combined) >= 120:
+            return combined
+    except Exception:
+        return None
+    return None
+
 def get_article_content(url):
     """
     Use trafilatura to download and extract main article text.
-    Lower threshold so short but valid articles still count.
+
+    We first fetch the page ourselves with a newsroom-friendly user agent,
+    then pass the HTML to trafilatura so we have a better chance of getting
+    the full body instead of just a short summary.
     """
     try:
+        session = requests.Session()
+        session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/122.0 Safari/537.36"
+            ),
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Upgrade-Insecure-Requests": "1",
+            "DNT": "1",
+        })
+
+        resp = session.get(url, timeout=10)
+        if resp.ok:
+            html = resp.text
+            text = trafilatura.extract(
+                html,
+                include_comments=False,
+                include_links=False,
+                favor_recall=True
+            )
+            # Lower threshold so we still analyse shorter pieces
+            if text and len(text) >= 120:
+                return text, "Agent (trafilatura via direct fetch)"
+
+            fallback = _extract_paragraph_fallback(html)
+            if fallback:
+                return fallback, "Agent (paragraph fallback)"
+
+        # Fallback to trafilatura's own fetching if the manual request failed
         downloaded = trafilatura.fetch_url(url)
         if downloaded:
             text = trafilatura.extract(
@@ -116,11 +172,11 @@ def get_article_content(url):
                 include_links=False,
                 favor_recall=True
             )
-            if text and len(text) > 250:
-                return text
+            if text and len(text) >= 120:
+                return text, "Agent (trafilatura fetch_url)"
     except Exception:
         pass
-    return None
+    return None, "⚠️ Snippet"
 
 def analyze_content(text, method="Snippet"):
     score = sia.polarity_scores(text)['compound']
@@ -286,22 +342,25 @@ def fetch_news_score(query, article_limit=5):
             seen.add(key)
 
             real_url = get_final_url(entry.link)
-            full_text = get_article_content(real_url)
-            
+            full_text, method_details = get_article_content(real_url)
+
             if full_text:
                 score, label, icon, expl = analyze_content(
-                    full_text, "Full Text (article body)"
+                    full_text, f"Full Text (article body) — {method_details}"
                 )
-                snippet = full_text[:600] + "..."
-                method = "✅ Full Text"
+                snippet = (
+                    full_text[:600] + ("..." if len(full_text) > 600 else "")
+                )
+                excerpt = full_text[:1200] + ("..." if len(full_text) > 1200 else "")
+                method = f"✅ Full Text | {method_details}"
             else:
                 raw_desc = entry.get('description', entry.title)
-                import re
                 clean_desc = re.sub('<.*?>', '', raw_desc)
                 score, label, icon, expl = analyze_content(
                     clean_desc, "Snippet (headline/description)"
                 )
                 snippet = clean_desc
+                excerpt = clean_desc
                 method = "⚠️ Snippet"
                 
             try:
@@ -316,6 +375,7 @@ def fetch_news_score(query, article_limit=5):
                 "source": entry.source.title if hasattr(entry, 'source') else "News",
                 "date": clean_date,
                 "snippet": snippet,
+                "excerpt": excerpt,
                 "Sentiment": label,
                 "Icon": icon,
                 "Score": score,
@@ -1042,8 +1102,8 @@ def main():
                                 st.caption(
                                     f"{item['source']} | {item['date']} | {item['Method']}"
                                 )
-                                # Text the AI actually read
-                                st.write(item['snippet'])
+                                st.markdown("**What the AI read (excerpt):**")
+                                st.write(item['excerpt'])
                                 st.markdown("---")
                                 st.write(item['Explanation'])
                                 st.markdown(f"[Read Article]({item['link']})")
